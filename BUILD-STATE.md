@@ -1,4 +1,4 @@
-# Solomon — Build State Snapshot (2026-05-25 morning)
+# Solomon — Build State Snapshot (2026-05-25 evening)
 
 This file is the source of truth for "what state is the build in right now" so we don't lose context between sessions. Update at the end of every working session.
 
@@ -45,34 +45,59 @@ This file is the source of truth for "what state is the build in right now" so w
 - ✅ **`solomon/pipeline/_helpers.py`** — `_UPDATABLE_COLUMNS` widened to include `owner_state_ceiling` and `effective_autonomy`.
 - ✅ **Tests: 315/315 passing on SQLite** (was 245). 70 new tests across `test_decisions.py`, `test_autonomy_ladder.py`, `test_non_negotiables.py`, `test_stage_system1.py`, `test_stage_system2.py`, `test_stage_audit.py`, `test_stage_owner_state.py`, `test_stage_action.py`, `test_pipeline_runner.py`. Shared LLM-stub + event-seeder helpers live in `tests/_pipeline_helpers.py`; `tests/__init__.py` was added so the helpers are importable as `tests._pipeline_helpers`.
 
+### Session B — Conductor wire-up (2026-05-25 evening)
+
+- ✅ **`solomon/conductor.py` — MODIFIED.** `_pre_llm_call` now drives the 10-stage pipeline via `solomon.pipeline.runner.run`, with three non-negotiable safeguards baked in. The legacy 7-step inline body is preserved verbatim as `_pre_llm_call_legacy` and runs as the fallback whenever the pipeline path is disabled or crashes. `TurnContext` gained 10 new fields (`event_id`, `classification`, `system1_output`, `system2_output`, `owner_state`, `owner_state_ceiling`, `effective_autonomy`, `action_taken`, `stage_timings_ms`, `status`) so the conductor mirrors the 14 events columns the prompt called for.
+- ✅ **Kill-switch env var: `SOLOMON_PIPELINE_DISABLE`.** Truthy values (`1`, `true`, `yes`, `on`, case-insensitive) make `_pre_llm_call` skip the pipeline entirely and run the legacy body. **Recovery path for the wild:** `echo SOLOMON_PIPELINE_DISABLE=1 >> ~/.hermes/.env && hermes restart`. The kill switch is read from env on every turn (no module-load caching) so a `.env` flip takes effect on the next Hermes restart without further surgery.
+- ✅ **Mode env var: `SOLOMON_PIPELINE_MODE`.** Defaults to `inline` (run the 10 stages synchronously inside `_pre_llm_call`, then populate `TurnContext` from the events row). Set to `queue` to skip in-process execution — the conductor still inserts an events row with `status='pending'` and returns; the (future) pipeline-tick worker picks it up. Unknown values fall back to `inline` with a warning. The queue-mode worker is **out of scope** for Session B; there's a TODO comment pointing at `solomon/workers/pipeline_tick/__main__.py` for the future implementer.
+- ✅ **try/except wrapping the pipeline path.** Any exception during the INSERT, the `pipeline.runner.run` call, or the row read-back is caught: the events row gets `status='errored'` + `audit_reasoning="pipeline error: ..."`, and `_pre_llm_call_legacy` runs so the turn still gets a response. **A pipeline crash MUST NOT kill the Hermes turn** is enforced by both the try/except *and* a regression test that asserts the legacy path populated `turn.audit_verdict` after the runner raised.
+- ✅ **Audit-verdict → system-message mapping.** Injected into the `messages` list passed to the hook (lists are mutable; Hermes sees the append). `TurnContext.system_prompt` is intentionally NOT touched because that field is overwritten elsewhere in the Hermes pipeline.
+    - `status='skipped'` (low salience) → **no message** injected; continue.
+    - `status='blocked_by_hard_rule'` → decline message citing the non-negotiable reason.
+    - `status='complete'` + `audit_verdict='REJECT'` → decline message with audit reasoning.
+    - `status='complete'` + `audit_verdict='REQUEST_RETHINK'` → rethink message with audit reasoning.
+    - `status='complete'` + `audit_verdict='APPROVE'` → **no message**; continue.
+    - Errored / pending / unknown → **no message** (conservative).
+- ✅ **`_post_llm_call`** now calls `solomon.storage.decisions.mirror_event_to_decision(event_id)` when the turn carries an `event_id`, so the sleep-cycle and review-queue consumers see the decisions row. The call is idempotent: `mirror_event_to_decision` checks for an existing decisions row by `event_id` before inserting, so the duplicate that `stage_action`'s own mirror call would otherwise produce in inline mode is silently absorbed. In queue mode this populates the decisions row right after the gateway response (the row carries whatever the events row had at that point — usually still `pending`).
+- ✅ **`solomon/storage/decisions.py`** — `mirror_event_to_decision` is now idempotent on `event_id`. Existing 8 decisions tests still pass.
+- ✅ **Tests: 327/327 passing on SQLite** (315 → 327). 12 new tests in `tests/test_conductor_pipeline.py` covering: kill-switch + no events insert, inline happy path + 14-column population, low-salience skipped (no message), hard-rule block (decline message), audit REJECT (decline), audit REQUEST_RETHINK (rethink), queue mode (pending + no runner), runner-raises (errored + legacy fallback), post_llm_call mirror idempotency, plus three unit tests for the `_pipeline_disabled` / `_pipeline_mode` env-var parsers. Existing conductor surface (no tests targeting it before, but 315 tests across the rest of the codebase) all still green.
+
 ## What's partially built — files exist but need wiring + verification
 
-The 10-stage pipeline is complete and unit-tested. **It is NOT yet wired into the conductor** — that's Session B (see priority list below). Until Session B lands, every Hermes turn still goes through the conductor's legacy 7-step inline pre-LLM hook; the new `pipeline.runner.run` is only invoked from tests.
-
-Remaining decision-pipeline work:
-
-- ❌ `solomon/conductor.py` modification — read `SOLOMON_PIPELINE_MODE`, insert an events row, call `pipeline.runner.run`, populate `TurnContext` from the returned row. **Session B.** Must include kill-switch env var (`SOLOMON_PIPELINE_DISABLE=1`), try/except fall-through to legacy path, and before/after pytest baselines. See `references/critical-path-prompt-template.md` in the solomon-project skill.
+The conductor wire-up is now live. The 10-stage pipeline runs on every non-private Hermes turn (unless `SOLOMON_PIPELINE_DISABLE=1`).
 
 Remaining sleep / repo housekeeping:
 
 - ❌ 4 new sleep jobs: `job_9_corpus_lint.py`, `job_10_corpus_backup.py`, `job_11_embed_pending.py`, `job_12_yaml_reconcile.py`
 - ❌ Append new jobs to `solomon/sleep/runner.py::JOB_ORDER`
 - ❌ Push to GitHub.
+- ❌ (Future, not blocking) The queue-mode pipeline-tick worker at `solomon/workers/pipeline_tick/__main__.py`. The conductor inserts the row; until the worker exists, `SOLOMON_PIPELINE_MODE=queue` essentially fire-and-forgets to a stale row. **Default mode is `inline` so this doesn't bite us.**
 
 ## Recommended next-session priority order
 
-1. **Session B — conductor wire-up (`solomon/conductor.py`).** Replace the in-place `_pre_llm_call` body with the four-line "insert events row → call `pipeline.runner.run(event_id)` → read row back into `TurnContext`" sequence. Add the `SOLOMON_PIPELINE_DISABLE=1` kill switch and the legacy-path fallback. Run `pytest tests/ -q` BEFORE the change to capture the 315/315 baseline, then again AFTER. Reference: `docs/REPORT-PIPELINE.md` §4.2–4.3 and the solomon-project skill's `references/critical-path-prompt-template.md`. This is the critical-path session — pair anxiety warnings with the recovery path and confidence breakdown in the prompt.
-2. **Session C — 4 new sleep jobs.** `job_9_corpus_lint` is mechanical (calls `solomon.corpus.lint.run_lint()`); `job_10_corpus_backup`, `job_11_embed_pending`, `job_12_yaml_reconcile` are also small. Then append to `JOB_ORDER`.
-3. **Push to GitHub.**
+1. **Session C — 4 new sleep jobs.** `job_9_corpus_lint` is mechanical (calls `solomon.corpus.lint.run_lint()`); `job_10_corpus_backup`, `job_11_embed_pending`, `job_12_yaml_reconcile` are also small. Then append to `JOB_ORDER`. After that, push to GitHub.
+2. **(Stretch, post-C)** Build the pipeline-tick worker so `SOLOMON_PIPELINE_MODE=queue` becomes a real option (offloads the synchronous runner cost from the user-visible turn).
+
+## Pipeline kill-switch — pinned recovery path
+
+If the pipeline misbehaves in the wild (the per-turn hot path is now driving the 10 stages):
+
+```
+echo SOLOMON_PIPELINE_DISABLE=1 >> ~/.hermes/.env
+hermes restart      # or: systemctl restart hermes if running as a service
+```
+
+That flips `_pre_llm_call` back to the bit-for-bit pre-Session-B body. No code change, no rollback, no uninstall. Confirm recovery by sending a Telegram message; if Hermes responds normally and `solomon.conductor` log lines stop mentioning `pipeline` at INFO level, you're back to baseline.
 
 ## Pinned reading order for next session
 
 Before writing any code, re-read:
 1. `BUILD-STATE.md` (this file)
 2. `docs/REPORT-PIPELINE.md` section 4 (the integration plan)
-3. `references/eliza-listening.md` (the seven mirroring rules — pin to every interview-phase LLM call)
+3. `references/sleep-cycle-jobs.md` (the 12-job catalogue) for Session C
+4. `references/eliza-listening.md` (the seven mirroring rules — pin to every interview-phase LLM call)
 
-## Files modified or added in Session A (2026-05-25, pipeline stages 6–10 + runner + plumbing)
+## Files modified or added in Session A (2026-05-25 morning, pipeline stages 6–10 + runner + plumbing)
 
 ```
 + solomon/pipeline/runner.py                  # 10-stage walker
@@ -105,6 +130,17 @@ M solomon/pipeline/_helpers.py                # widen _UPDATABLE_COLUMNS
 M BUILD-STATE.md                              # this file
 ```
 
-**Tests:** 315/315 passing on SQLite. Run `pytest tests/ -v` to verify.
+## Files modified or added in Session B (2026-05-25 evening, conductor wire-up)
 
-**Session A explicitly did NOT touch `solomon/conductor.py`.** That's Session B's job and the conductor is in the live per-turn hot path; bundling its modification with the mechanical stage work would have burned Opus budget on the wrong file. See the commit message for the same call-out.
+```
+M solomon/conductor.py                        # _pre_llm_call drives pipeline.runner.run; legacy body preserved as _pre_llm_call_legacy; TurnContext gained 10 pipeline-column fields; _post_llm_call mirrors to decisions
+M solomon/storage/decisions.py                # mirror_event_to_decision is now idempotent on event_id
+
++ tests/test_conductor_pipeline.py            # 12 tests: kill-switch, inline happy, low-salience, hard-rule block, audit REJECT, audit REQUEST_RETHINK, queue mode, runner crash → errored + legacy fallback, post_llm_call mirror idempotency, plus env-var parser units
+
+M BUILD-STATE.md                              # this file
+```
+
+**Tests:** 327/327 passing on SQLite (315 baseline + 12 new in Session B). Run `pytest tests/ -q` to verify. Also verified green with `SOLOMON_PIPELINE_DISABLE=1` set (kill-switch path produces bit-for-bit pre-Session-B behaviour).
+
+**Session B explicitly did NOT touch `solomon/pipeline/`, `solomon/corpus/`, `solomon/mentoring/`, `install.sh`, or any sleep job.** Those are either done (Session A and earlier) or scheduled for Session C.
