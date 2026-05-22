@@ -45,9 +45,15 @@ dev = [
 local-embeddings = [
     "sentence-transformers>=2.6",
 ]
-# Everything: dev tools + local embeddings.
+# spaCy NER for the interview vocabulary Pass 1 (NP/VP chunks). Pure
+# Python and the en_core_web_sm model are both small (~50MB total).
+# Without this extra, vocabulary capture falls back to LLM-only.
+interview-vocab = [
+    "spacy>=3.7",
+]
+# Everything: dev tools + local embeddings + interview vocab.
 all = [
-    "solomon-brain[dev,local-embeddings]",
+    "solomon-brain[dev,local-embeddings,interview-vocab]",
 ]
 
 [project.scripts]

@@ -1,4 +1,4 @@
-# Solomon — Build State Snapshot (2026-05-22)
+# Solomon — Build State Snapshot (2026-05-22 evening)
 
 This file is the source of truth for "what state is the build in right now" so we don't lose context between sessions. Update at the end of every working session.
 
@@ -23,17 +23,10 @@ This file is the source of truth for "what state is the build in right now" so w
 - ✅ **Three deep-dive reports** at `docs/REPORT-INTERVIEW.md`, `REPORT-CORPUS.md`, `REPORT-PIPELINE.md` — these are the integration plans
 - ✅ **Sensitivity filter upgraded** to spaCy NER + regex + allowlist (graceful fallback to regex-only when spaCy isn't installed). 6/6 existing tests still pass.
 - ✅ **Divergence formula** upgraded to `0.6·jaccard + 0.4·(1 − length_ratio)`. 5 tests pass.
-- ✅ **Tests: 36/36 passing.**
+- ✅ **Interview engine — DONE.** Session runner rewritten to the 5-stage flow (Setup → Discovery → Required-fields → Closing checkpoint → Foundation YAML render). All 7 probe libraries wired in. Stage D intent classifier (confirm/correct/add/keep_talking/abandon) with deterministic short-circuits for the common words. Resume-on-Ctrl-C works because the `sessions` row stays `open` until Stage E succeeds. 19 new interview/coverage tests + 3 session-runner integration tests with stubbed LLM and scripted stdin.
+- ✅ **Tests: 66/66 passing** (was 36; +30 new for the interview).
 
 ## What's partially built — files exist but need wiring + verification
-
-**Interview engine** (Subagent 1 got most of the way through but didn't finish wiring):
-- ✅ All 7 probe library YAMLs at `solomon/onboarding/probe_library/`: industry, belief_system, why, principles, ideal_outcomes, non_negotiables, scopes, _generic
-- ✅ `engine.py`, `extraction.py`, `vocabulary.py`, `coverage.py`, `contradiction.py`, `redact.py` files exist
-- ⏳ `session_runner.py` — needs rewrite to use the new engine modules (currently still the old plain-Q&A version)
-- ⏳ Verify the 5-stage flow (setup → discovery → required-fields → closing checkpoint → YAML render) actually runs end-to-end
-- ⏳ Verify ulid + spacy deps land in `pyproject.toml`
-- ⏳ Add tests: `test_interview_engine.py`, `test_coverage.py`
 
 **Corpus pipeline** (Subagent 2 got the scaffolding done):
 - ✅ Directory structure: `corpus/{inbox,raw,wiki}/<category>/` with `.gitkeep`
@@ -70,12 +63,11 @@ This file is the source of truth for "what state is the build in right now" so w
 
 ## Recommended next-session priority order
 
-1. **Finish the interview engine** (rewrite session_runner.py to use the 5-stage flow, add tests, verify ulid + spacy deps). This is the user-facing piece. Without it nothing else matters.
-2. **Finish the pipeline** (stages 6–10, runner.py, non_negotiables shim, conductor wire-up, autonomy L0–L4). The brain's live loop.
-3. **Finish the corpus** (extract → chunk → embed → llm_passes → wiki → rules → ingest, then the two workers). Required for onboarding to be complete per the design.
-4. **4 new sleep jobs.**
-5. **Rewrite install.sh** to walk the user through the full onboarding flow on first install.
-6. **Push to GitHub.**
+1. **Finish the pipeline** (stages 6–10, runner.py, non_negotiables shim, conductor wire-up, autonomy L0–L4). The brain's live loop. This is the biggest remaining chunk.
+2. **Finish the corpus** (extract → chunk → embed → llm_passes → wiki → rules → ingest, then the two workers). Required for onboarding to be complete per the design.
+3. **4 new sleep jobs.**
+4. **Rewrite install.sh** to walk the user through the full onboarding flow on first install. Now that the interview actually works, this is the user-facing payoff.
+5. **Push to GitHub.**
 
 ## Pinned reading order for next session
 
@@ -89,27 +81,14 @@ Before writing any code, re-read:
 ## Files modified or added in the last session
 
 ```
-M pyproject.toml                       # json-logic-qubit, ulid-py, sentence-transformers
-M solomon/ingestion/sensitivity_filter.py  # spaCy NER + regex
-M solomon/reasoning/divergence.py     # new formula: 0.6·jaccard + 0.4·(1−length_ratio)
-M solomon/storage/__init__.py          # re-export the new API
-M solomon/storage/pool.py              # SQLite WAL + Postgres dual-backend
-M solomon/storage/schema.sql           # 33 tables, unified
-M tests/test_divergence.py            # 5 new tests for new formula
+M solomon/onboarding/session_runner.py    # rewrite: 5-stage flow over the engine
+M pyproject.toml                          # add interview-vocab optional (spacy)
+M BUILD-STATE.md                          # this file
 
-+ SOUL.md
-+ corpus/                              # owner-editable config + 3-layer folder structure
-+ docs/REPORT-CORPUS.md
-+ docs/REPORT-INTERVIEW.md
-+ docs/REPORT-PIPELINE.md
-+ foundation/                          # all 7 YAMLs + JSON schemas
-+ references/                          # 7 design docs from Drive
-+ solomon/corpus/__init__.py, route.py, schema_config.py
-+ solomon/onboarding/interview/{__init__,contradiction,coverage,engine,extraction,redact,vocabulary}.py
-+ solomon/onboarding/probe_library/{README.md, _generic, belief_system, ideal_outcomes, industry, non_negotiables, principles, scopes, why}.yaml
-+ solomon/pipeline/{__init__, _helpers, stage_capture, stage_classification, stage_hard_rule, stage_retrieval, stage_salience}.py
-+ solomon/storage/schema_postgres.sql
-+ BUILD-STATE.md                       # this file
++ tests/conftest.py                       # solomon_db fixture (per-test SQLite)
++ tests/test_interview_engine.py          # 11 tests for engine.select_next_probe
++ tests/test_coverage.py                  # 16 tests for coverage.* helpers
++ tests/test_session_runner.py            # 3 end-to-end tests with stubbed LLM
 ```
 
-**Tests:** 36/36 passing on SQLite. Run `pytest tests/ -v` to verify.
+**Tests:** 66/66 passing on SQLite. Run `pytest tests/ -v` to verify.
