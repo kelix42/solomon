@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "solomon-brain"
-version = "0.1.0"
+version = "0.2.0"
 description = "An AI chief of staff that learns how you make decisions, then gradually makes them for you. Hermes plugin."
 readme = "README.md"
 license = {text = "MIT"}
@@ -34,6 +34,15 @@ dev = [
     "pytest-asyncio>=0.21",
     "ruff>=0.4",
     "mypy>=1.8",
+]
+# Local embeddings (the default). Pulls sentence-transformers + torch (~1GB).
+# If you opt into SOLOMON_EMBEDDING_PROVIDER=openai, you don't need this.
+local-embeddings = [
+    "sentence-transformers>=2.6",
+]
+# Everything: dev tools + local embeddings.
+all = [
+    "solomon-brain[dev,local-embeddings]",
 ]
 
 [project.scripts]

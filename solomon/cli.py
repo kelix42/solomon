@@ -1,11 +1,14 @@
 """Solomon command-line interface.
 
 Exposes:
-  solomon init       — provision database, run first-time setup
-  solomon onboard    — run an onboarding session (or `list`)
-  solomon doctor     — health check
-  solomon sleep      — run the nightly cycle on demand
-  solomon uninstall  — restore pre-Solomon Hermes config
+  solomon init                 — provision database, run first-time setup
+  solomon onboard              — run an onboarding session (or `list`); also drives ingestion
+  solomon ingest PATH [PATH...] — ingest one or more historical documents
+  solomon ingestion review     — review extracted decisions and proposed heuristics
+  solomon ingestion list       — list ingestion jobs
+  solomon doctor               — health check
+  solomon sleep                — run the nightly cycle on demand
+  solomon uninstall            — restore pre-Solomon Hermes config
 
 Entry point declared in pyproject.toml as ``solomon = solomon.cli:main``.
 """
@@ -111,6 +114,118 @@ def cmd_init() -> int:
         "     Use [cyan]/private[/] in any session to opt out of logging for that conversation.\n",
         style="green",
     )
+    return 0
+
+
+def cmd_ingest(args: List[str]) -> int:
+    """Ingest one or more historical documents.
+
+    Usage:
+        solomon ingest path/to/file1.txt path/to/file2.eml ...
+        solomon ingest --flag-sensitive path/to/medical.pdf -- path/to/other.txt
+    """
+    if not args:
+        _print("Usage: solomon ingest [--flag-sensitive PATH ...] PATH [PATH ...]", style="yellow")
+        return 1
+    flagged: List[str] = []
+    paths: List[str] = []
+    i = 0
+    while i < len(args):
+        a = args[i]
+        if a == "--flag-sensitive" and i + 1 < len(args):
+            flagged.append(args[i + 1])
+            i += 2
+            continue
+        if a == "--":
+            i += 1
+            continue
+        paths.append(a)
+        i += 1
+    paths = [p for p in paths if p not in set(flagged) or True]  # keep them; flagged ones get the skip-flag
+    if not paths and not flagged:
+        _print("No paths provided.", style="yellow")
+        return 1
+    all_paths = paths + flagged
+    _print(f"[cyan]Ingesting {len(all_paths)} document(s)...[/]")
+    from .ingestion.upload_handler import ingest_paths
+    summary = ingest_paths(all_paths, flagged_sensitive_paths=flagged)
+    _print(
+        f"\n[green]Done.[/] Processed {summary['documents_processed']}, "
+        f"skipped {summary['documents_skipped']}, "
+        f"extracted {summary['decisions_extracted']} decisions, "
+        f"stored {summary['embeddings_stored']} embeddings, "
+        f"proposed {summary['heuristics_proposed']} heuristics."
+    )
+    if summary["errors"]:
+        _print(f"[yellow]Errors:[/] {summary['errors']}", style="yellow")
+    _print("\nReview the proposed heuristics with: [cyan]solomon ingestion review[/]")
+    return 0
+
+
+def cmd_ingestion(args: List[str]) -> int:
+    """Manage ingestion: list jobs, review pending heuristics + decisions."""
+    if not args or args[0] == "list":
+        from .ingestion import list_pending_jobs
+        from .storage.decisions import get_or_create_tenant_id
+        tenant_id = get_or_create_tenant_id()
+        jobs = list_pending_jobs(tenant_id)
+        if not jobs:
+            _print("No pending ingestion jobs.")
+            return 0
+        for j in jobs:
+            _print(f"  job {j['job_id']}: {j['status']} ({j['document_count']} docs, created {j['created_at']})")
+        return 0
+    if args[0] == "review":
+        return _interactive_review()
+    _print(f"Unknown subcommand: {args[0]}. Try `list` or `review`.", style="red")
+    return 1
+
+
+def _interactive_review() -> int:
+    """Walk the owner through pending heuristics and high-salience decisions."""
+    from .ingestion.review_queue import (
+        pending_review_items,
+        approve_heuristic,
+        reject_heuristic,
+        defer_heuristic,
+    )
+    from .storage.decisions import get_or_create_tenant_id
+    tenant_id = get_or_create_tenant_id()
+    items = pending_review_items(tenant_id)
+    heuristics = items.get("heuristics", [])
+    decisions = items.get("decisions", [])
+
+    if not heuristics and not decisions:
+        _print("[green]Nothing pending review. Inbox zero.[/]", style="green")
+        return 0
+
+    _print(f"\n[bold cyan]Solomon review queue[/]: {len(heuristics)} heuristic proposals, {len(decisions)} extracted decisions.\n")
+
+    # Heuristics first — they're the more valuable thing to look at.
+    for h in heuristics:
+        _print("\n" + "─" * 60)
+        _print(f"[bold]Proposed heuristic[/] (id={h.get('pending_id')})")
+        _print(f"  scope:     {h.get('scope')}")
+        _print(f"  condition: {h.get('proposed_condition')}")
+        _print(f"  action:    {h.get('proposed_action')}")
+        _print(f"  support:   {h.get('support_count')} decisions back this up")
+        try:
+            choice = input("\n  [a]pprove  [r]eject  [d]efer  [s]kip > ").strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            print()
+            return 0
+        if choice == "a":
+            new_id = approve_heuristic(tenant_id, int(h["pending_id"]))
+            _print(f"  ✓ Approved as heuristic {new_id}")
+        elif choice == "r":
+            reject_heuristic(tenant_id, int(h["pending_id"]))
+            _print("  ✗ Rejected")
+        elif choice == "d":
+            defer_heuristic(tenant_id, int(h["pending_id"]))
+            _print("  ⏸ Deferred")
+        # 's' or anything else = skip
+
+    _print("\n[green]Review complete.[/]", style="green")
     return 0
 
 
@@ -293,6 +408,8 @@ def main(argv: Optional[List[str]] = None) -> int:
         "init": lambda: cmd_init(),
         "doctor": lambda: cmd_doctor(),
         "onboard": lambda: cmd_onboard(rest),
+        "ingest": lambda: cmd_ingest(rest),
+        "ingestion": lambda: cmd_ingestion(rest),
         "sleep": lambda: cmd_sleep(),
         "uninstall": lambda: cmd_uninstall(),
     }.get(cmd, lambda: (_print(f"Unknown command: {cmd}", style="red") or 1))()  # type: ignore[func-returns-value]

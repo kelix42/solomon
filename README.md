@@ -21,6 +21,56 @@ That's it. The installer:
 
 After install, every Hermes session you run is Solomon. The brain learns from everything you do.
 
+## Onboarding (the first thing you do after install)
+
+A new tenant cannot start at zero. The brain needs a foundation. Onboarding has two parts that both have to happen before the brain goes live:
+
+**1. The six-session interview** (~6-10 hours total, spread over 1-2 weeks)
+
+```bash
+solomon onboard session_1   # Belief and worldview
+solomon onboard session_2   # The why
+solomon onboard session_3   # Principles
+solomon onboard session_4   # Ideal outcomes
+solomon onboard session_5   # Non-negotiables
+solomon onboard session_6   # Domain map
+```
+
+Each session asks 5-10 structured questions, transcribes voice or accepts text, and writes the answers into a YAML foundation file (`~/.hermes/solomon/foundation/`).
+
+**2. The historical ingestion** (the big batch dump)
+
+This is how the brain gets the years of context the interview alone can't cover. Drop old emails, contracts, transcripts, SOPs, customer feedback, internal docs — anything that contains decisions you've made.
+
+```bash
+solomon ingest path/to/old/emails/*.eml \
+                path/to/proposals/*.pdf \
+                path/to/sops/*.md \
+                path/to/transcripts/*.txt
+
+# Anything you don't want indexed at all (medical records, legal, family stuff):
+solomon ingest --flag-sensitive path/to/private/file.pdf -- path/to/normal/file.txt
+```
+
+The ingestion pipeline:
+1. Strips PII (SSN, SIN, credit cards, phones, passports, email addresses) before anything else sees the text
+2. Classifies each document (email thread, contract, transcript, SOP, etc.)
+3. Chunks it the right way for its type (emails by message, transcripts by speaker turn, contracts by section)
+4. Embeds each chunk locally so the brain can search by meaning later (no API calls, nothing leaves your machine for this step)
+5. Extracts the decisions inside (situation, options, decision, reasoning, outcome)
+6. Mines patterns across all your documents and proposes heuristics ("In 23 of 31 pricing decisions, after-hours work was charged 20-25% above base — looks like an implicit rule")
+7. Cross-references documents that reference each other
+
+Then you review what was found:
+
+```bash
+solomon ingestion review
+```
+
+Walk through each proposed heuristic with approve/reject/defer. Only approved heuristics enter the brain's active rule set.
+
+**After both parts are done, the brain enters observe-only mode for 30 days.** It captures everything, predicts, audits, and logs — but takes no actions. After 30 days of clean track record, scopes can begin moving up the autonomy ladder.
+
 ## What you get
 
 - **Capture.** Every message on every channel becomes a `RawEvent`. Gmail, Twilio, Plaud, voice notes, webhooks.

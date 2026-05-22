@@ -1,5 +1,35 @@
 # Changelog
 
+## 0.2.0 — Ingestion pipeline complete
+
+Onboarding is now actually onboarding. The six-session interview was already there; this release adds the historical-document ingestion that the design doc requires as the other half of onboarding.
+
+### Added — ingestion (Part 26)
+
+- **Embedder** (`solomon/ingestion/embedder.py`). Default: local `sentence-transformers/all-MiniLM-L6-v2` (384-dim, CPU, no API calls). Opt-in: OpenAI `text-embedding-3-small` (1536-dim) via `SOLOMON_EMBEDDING_PROVIDER=openai`.
+- **Sensitivity filter** (`solomon/ingestion/sensitivity_filter.py`). Regex PII redaction before anything else touches the text: SSN, Canadian SIN, credit cards, phone numbers, passports, email addresses. Plus owner-flagged "skip-this-document" mode.
+- **Document classifier** (`solomon/ingestion/classifier.py`). One LLM call per document — type, time period, participants, domain, salience estimate. Falls back to filename heuristics when the LLM isn't configured.
+- **Type-specific chunker** (`solomon/ingestion/chunker.py`). Email threads split by message, transcripts by speaker turn (short turns merged), contracts and SOPs by heading, generic by paragraph with overlap.
+- **Decision extractor** (`solomon/ingestion/extractor.py`). Pulls situation / options / decision / reasoning / outcome / decision-maker / timestamp from each chunk that looks decision-rich. Cheap keyword pre-filter saves LLM calls. Confidence floor of 0.3 to drop low-quality extractions.
+- **Heuristic miner** (`solomon/ingestion/heuristic_miner.py`). After all documents are processed, one cross-document pass finds repeated patterns and proposes heuristics into `pending_heuristics` for owner review. Decisions made by non-owners are extracted but excluded from mining.
+- **Cross-referencer** (`solomon/ingestion/cross_referencer.py`). Phase 1: regex-only. Subject continuation, thread-id matching, filename-similarity ≥80%.
+- **Budget tracker** (`solomon/ingestion/budget_tracker.py`). Per-tenant monthly token cap (default 1M, env-overridable). Pause + skip deep stages when budget is exhausted.
+- **Review queue** (`solomon/ingestion/review_queue.py`). DB-backed approve/reject/defer/promote for pending heuristics.
+- **Upload handler** (`solomon/ingestion/upload_handler.py`). The orchestrator. Runs all seven stages per document, then the two cross-document passes.
+- **CLI**: `solomon ingest PATH...`, `solomon ingestion review`, `solomon ingestion list`.
+- **Onboarding flow updated**: after Session 6, the runner prints a clear "you're not done yet — now ingest your historical material" message with the exact next commands.
+
+### Changed
+
+- `embeddings.vector` column went from `vector(1536)` to `vector(384)` to match the local default. Users opting into OpenAI embeddings will need to migrate that column.
+- `pyproject.toml`: new optional extra `local-embeddings` pulls `sentence-transformers`. `install.sh` installs it by default.
+
+### Tests
+
+17 new tests covering the sensitivity filter, chunker, and budget tracker. **35/35 tests pass.**
+
+---
+
 ## 0.1.0 — Phase 1 baseline
 
 First public release. Phase 1 of the design doc is operational; Phase 2–5 features are scaffolded with TODOs where deeper work is pending.
@@ -25,7 +55,6 @@ First public release. Phase 1 of the design doc is operational; Phase 2–5 feat
 - Predictions + counterfactuals storage (LLM-generated).
 - Sleep cycle runner + 8 jobs (Jobs 2, 6, 7, 8 fully implemented; Jobs 1, 3, 4, 5 scaffolded with TODOs for the LLM-driven steps).
 - Onboarding curriculum (six sessions with full questions), session runner.
-- Ingestion queueing + DB tables.
 - Solomon CLI: `init`, `doctor`, `onboard`, `sleep`, `uninstall`.
 - 18 tests covering the adapter, raw event capture, and divergence score.
 - GitHub Actions CI (3.10 / 3.11 / 3.12).

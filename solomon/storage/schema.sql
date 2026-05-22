@@ -276,7 +276,7 @@ CREATE TABLE IF NOT EXISTS embeddings (
     tenant_id           TEXT NOT NULL REFERENCES tenants(tenant_id),
     source_table        TEXT NOT NULL,
     source_id           BIGINT NOT NULL,
-    vector              vector(1536),
+    vector              vector(384),
     created_at          TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 CREATE INDEX IF NOT EXISTS idx_embeddings_lookup ON embeddings(tenant_id, source_table, source_id);

@@ -64,9 +64,9 @@ SOLOMON_REF="${SOLOMON_REF:-main}"
 # If we're being run from inside a checkout, install from there. Else pip
 # install from git.
 if [ -f "$(dirname "$0")/pyproject.toml" ] && grep -q '"solomon-brain"' "$(dirname "$0")/pyproject.toml"; then
-    "$HERMES_PY" -m pip install --upgrade "$(cd "$(dirname "$0")" && pwd)"
+    "$HERMES_PY" -m pip install --upgrade "$(cd "$(dirname "$0")" && pwd)[local-embeddings]"
 else
-    "$HERMES_PY" -m pip install --upgrade "git+${SOLOMON_REPO}@${SOLOMON_REF}"
+    "$HERMES_PY" -m pip install --upgrade "solomon-brain[local-embeddings] @ git+${SOLOMON_REPO}@${SOLOMON_REF}"
 fi
 
 ok "solomon-brain installed."

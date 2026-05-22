@@ -6,16 +6,26 @@ Solomon builds in five phases. Each phase ships something the user can run end-t
 
 These are the entry point for any new tenant. We build them after Phases 1–3 are stable so that when a tenant onboards, the live brain works on day one.
 
-**In repo today (Phase 1 baseline):**
-- ✅ Industry & business model picker scaffold (`solomon/onboarding/industry_selector.py` — placeholder)
+**In repo today:**
+- ✅ Industry & business model scaffold (`solomon/onboarding/industry_selector.py` — placeholder)
 - ✅ Onboarding curriculum YAML (`solomon/onboarding/curriculum/sessions.yaml`)
-- ✅ Session runner (`solomon/onboarding/session_runner.py`)
+- ✅ Session runner (`solomon/onboarding/session_runner.py`) with post-Session-6 prompt to ingest historical material
 - ✅ Foundation YAML writer (in session_runner)
-- ✅ Ingestion queue + DB tables (`solomon/ingestion/__init__.py`, `solomon/storage/schema.sql`)
-- 🚧 Seed heuristic extraction from sessions
-- 🚧 Industry modules (real_estate, construction, legal, professional_services)
-- 🚧 Ingestion pipeline: classify, chunk, embed, extract, mine, cross-reference, sensitivity filter, owner review
-- 🚧 Owner review UI
+- ✅ Ingestion queue + DB tables (`solomon/storage/schema.sql`)
+- ✅ Sensitivity filter — regex PII redaction (SSN, SIN, CC, phone, passport, email) + owner-flagged skip
+- ✅ Document classifier — type / period / participants / domain / salience estimate (one LLM call per doc)
+- ✅ Type-specific chunker — email threads by message, transcripts by speaker turn, contracts/SOPs by heading, generic by paragraph
+- ✅ Embedder — local `sentence-transformers/all-MiniLM-L6-v2` by default (384-dim, CPU, free); OpenAI `text-embedding-3-small` opt-in
+- ✅ Decision extractor — pulls situation / options / decision / reasoning / outcome / decision-maker per chunk with confidence floor
+- ✅ Heuristic miner — cross-document pattern detection, writes to `pending_heuristics` for owner approval
+- ✅ Cross-referencer — subject-line continuation, thread-id, filename similarity (Phase 1: no LLM)
+- ✅ Budget tracker — monthly token cap per tenant (default 1M tokens), env-overridable
+- ✅ Review queue — interactive CLI for approve/reject/defer per pending heuristic
+- ✅ Upload handler orchestrator — full pipeline end-to-end with `solomon ingest <paths>`
+- 🚧 Industry-specific onboarding modules (real_estate, construction, legal, professional_services)
+- 🚧 Seed heuristic extraction from session transcripts (auto-pass after Session 6)
+- 🚧 Owner review web UI (FastAPI; CLI works today)
+- 🚧 Whisper voice transcription for onboarding sessions
 
 ## Phase 1 — The basics (THIS IS WHAT IS BUILT)
 

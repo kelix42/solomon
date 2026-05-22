@@ -133,10 +133,37 @@ def main(argv: Optional[List[str]] = None) -> int:
         print("Available sessions:")
         for s in list_sessions():
             print(f"  {s}")
+        print("\nFlow:")
+        print("  solomon onboard session_1")
+        print("  solomon onboard session_2")
+        print("  ... continue through session_6")
+        print("  solomon ingest path/to/old/emails/*.eml  (bulk historical material)")
+        print("  solomon ingestion review                 (approve mined heuristics)")
+        print("\nAfter all 6 sessions and at least one ingestion batch, the brain enters")
+        print("observe-only mode for 30 days before any actions ship.")
         return 0
     session_key = argv[0]
     try:
         run_session(session_key)
+        # After session_6, remind the user to do ingestion before the brain
+        # can be considered onboarded.
+        if session_key == "session_6":
+            print("\n" + "─" * 60)
+            print("Session 6 complete. The 6-session interview is done.")
+            print("")
+            print("Onboarding is not finished yet — you also need to upload")
+            print("historical material (old emails, contracts, transcripts,")
+            print("SOPs, customer feedback). This is how the brain gets the")
+            print("years of context the interview alone can't cover.")
+            print("")
+            print("Next step:")
+            print("  solomon ingest path/to/your/historical/files/*")
+            print("")
+            print("Then review what was extracted:")
+            print("  solomon ingestion review")
+            print("")
+            print("After that, the brain enters observe-only mode for 30 days.")
+            print("─" * 60)
         return 0
     except Exception as e:  # noqa: BLE001
         print(f"Onboarding session failed: {e}")

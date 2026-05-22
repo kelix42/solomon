@@ -12,7 +12,7 @@ require a major version bump. The Hermes plugin hook contract is treated as
 load-bearing — if it changes, only ``solomon/adapter.py`` needs to know.
 """
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"
 
 # Re-exports for convenience in tests and downstream code.
 from . import adapter, conductor  # noqa: F401
