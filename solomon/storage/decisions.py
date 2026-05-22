@@ -100,6 +100,27 @@ def mirror_event_to_decision(event_id: str) -> Optional[int]:
     """
     with get_conn() as conn:
         with cursor(conn) as cur:
+            # Idempotency: if a decisions row already exists for this
+            # event_id (stage_action already mirrored, or a previous
+            # post_llm_call ran), return the existing id rather than
+            # inserting a duplicate. The conductor's post_llm_call
+            # hook calls this too, so without this guard inline-mode
+            # turns would produce two decisions rows per event.
+            execute(
+                cur,
+                "SELECT decision_id FROM decisions WHERE event_id = ? "
+                "ORDER BY decision_id ASC LIMIT 1",
+                (event_id,),
+            )
+            existing = cur.fetchone()
+            if existing is not None:
+                logger.debug(
+                    "mirror_event_to_decision: decisions row already exists "
+                    "for event_id=%s (decision_id=%s); skipping insert",
+                    event_id, existing[0],
+                )
+                return int(existing[0])
+
             execute(cur, "SELECT * FROM events WHERE event_id = ? LIMIT 1", (event_id,))
             row = cur.fetchone()
             if row is None:
