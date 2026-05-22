@@ -48,6 +48,8 @@ CREATE TABLE IF NOT EXISTS events (
     audit_verdict       TEXT,                    -- approve | downgrade | reject | request_rethink
     audit_reasoning     TEXT,
     owner_state         TEXT,                    -- green | yellow | red | unknown
+    owner_state_ceiling INTEGER,                 -- L0..L4 ceiling derived from owner_state (Stage 9)
+    effective_autonomy  INTEGER,                 -- min(scope_level, owner_state_ceiling) (Stage 10)
     action_taken        TEXT,
     stage_timings_ms    TEXT NOT NULL DEFAULT '{}',   -- JSON {stage_name: ms}
     status              TEXT NOT NULL DEFAULT 'pending',

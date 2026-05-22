@@ -42,6 +42,8 @@ _UPDATABLE_COLUMNS = frozenset({
     "audit_verdict",
     "audit_reasoning",
     "owner_state",
+    "owner_state_ceiling",
+    "effective_autonomy",
     "action_taken",
     "status",
     "stage_timings_ms",

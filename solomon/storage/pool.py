@@ -263,7 +263,58 @@ def init_storage(adapter: Any = None) -> None:  # noqa: ANN401  (Hermes adapter 
             with cursor(conn) as cur:
                 cur.execute(schema)
             conn.commit()
+        _migrate_add_columns(conn, bk)
     logger.info("Solomon storage ready (%s).", bk)
+
+
+# Columns to add via idempotent ALTERs for existing DBs. The CREATE TABLE
+# definition already includes these for fresh installs; this list catches
+# any pre-existing solomon.db that pre-dates the schema bump.
+_PENDING_MIGRATIONS: Tuple[Tuple[str, str, str], ...] = (
+    ("events", "owner_state_ceiling", "INTEGER"),
+    ("events", "effective_autonomy", "INTEGER"),
+)
+
+
+def _migrate_add_columns(conn: Any, bk: str) -> None:
+    """Add any new columns to existing tables (idempotent).
+
+    SQLite < 3.35 has no ADD COLUMN IF NOT EXISTS; Postgres has it as of
+    9.6. We use the portable pattern: introspect the columns first, then
+    ALTER only if missing.
+    """
+    for table, column, coltype in _PENDING_MIGRATIONS:
+        try:
+            existing = _existing_columns(conn, bk, table)
+            if column in existing:
+                continue
+            with cursor(conn) as cur:
+                cur.execute(f"ALTER TABLE {table} ADD COLUMN {column} {coltype}")
+            conn.commit()
+            logger.info("Added column %s.%s (%s).", table, column, coltype)
+        except Exception as e:  # noqa: BLE001
+            logger.warning("Migration ADD COLUMN %s.%s failed: %s", table, column, e)
+
+
+def _existing_columns(conn: Any, bk: str, table: str) -> set:
+    """Return the column names currently on ``table``."""
+    cols: set = set()
+    with cursor(conn) as cur:
+        if bk == "sqlite":
+            cur.execute(f"PRAGMA table_info({table})")
+            for row in cur.fetchall():
+                # PRAGMA table_info returns (cid, name, type, ...)
+                name = row[1] if not hasattr(row, "keys") else row["name"]
+                cols.add(str(name))
+        else:
+            cur.execute(
+                "SELECT column_name FROM information_schema.columns "
+                "WHERE table_name = %s",
+                (table,),
+            )
+            for row in cur.fetchall():
+                cols.add(str(row[0]))
+    return cols
 
 
 # Backwards-compat shim — older code in the repo calls ``get_pool()``.
