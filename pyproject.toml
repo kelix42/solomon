@@ -1,0 +1,61 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "solomon-brain"
+version = "0.1.0"
+description = "An AI chief of staff that learns how you make decisions, then gradually makes them for you. Hermes plugin."
+readme = "README.md"
+license = {text = "MIT"}
+authors = [{name = "Solomon Project"}]
+requires-python = ">=3.10"
+dependencies = [
+    # Postgres + pgvector
+    "psycopg[binary,pool]>=3.1",
+    "pgvector>=0.2.5",
+    # YAML for foundation files
+    "PyYAML>=6.0",
+    # CLI / installer
+    "click>=8.1",
+    "rich>=13.0",
+    # Web app for owner review UI
+    "fastapi>=0.110",
+    "uvicorn>=0.27",
+    # HTTP for webhook adapters and LLM calls
+    "httpx>=0.27",
+    # Git for foundation file versioning
+    "GitPython>=3.1",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.4",
+    "pytest-asyncio>=0.21",
+    "ruff>=0.4",
+    "mypy>=1.8",
+]
+
+[project.scripts]
+solomon = "solomon.cli:main"
+
+[project.entry-points."hermes_agent.plugins"]
+solomon = "solomon.plugin:register"
+
+[project.urls]
+Homepage = "https://github.com/YOUR_GH/solomon"
+Documentation = "https://github.com/YOUR_GH/solomon/tree/main/docs"
+
+[tool.setuptools.packages.find]
+include = ["solomon*"]
+
+[tool.setuptools.package-data]
+solomon = ["storage/schema.sql", "storage/migrations/*.sql", "onboarding/curriculum/*.yaml", "templates/**/*"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
