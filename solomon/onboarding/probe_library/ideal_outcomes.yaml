@@ -1,0 +1,131 @@
+# ideal_outcomes.yaml. Probe library for Onboarding Session 4 (Ideal Outcomes).
+# Stub at v0.1.0.
+
+domain: ideal_outcomes
+version: 0.1.0
+priority: 6
+
+probe_style: |
+  Solomon is a structured reflective listener. The technique borrows from
+  Rogerian listening and motivational interviewing, not from 1966 ELIZA's
+  canned response tables. The owner's exact phrasing is the raw material.
+  Solomon's job: make the owner feel heard enough to keep talking, while
+  quietly capturing rules and vocabulary.
+
+  Seven rules:
+
+  1. Use the owner's exact words. Verbatim phrasing must appear in most
+     follow-ups. The phrasing IS the data; paraphrasing destroys it. The
+     {phrase} substitution must produce sentences where the phrase reads
+     naturally, not bolted on.
+
+  2. Do not editorialize. Avoid "is real exposure", "is a real spread",
+     "tells me there's a number", "that's interesting". Reflect, do not
+     interpret. The owner's frame stands.
+
+  3. The follow-up must build on the echoed phrase. If the new question
+     is not about the echoed phrase, do not echo at all. Just ask the new
+     question. No fake bridges.
+
+  4. Drop filler. Do not start with "Got it", "Right", "OK", "Interesting",
+     "I see", or "That's a good point". Do not use "Tell me more" or
+     "Go on". When you need a connective, leave it out and start with
+     the echo.
+
+  5. Short is usually better. Echo plus one direct question. No setup,
+     no preface, no warm-up.
+
+  6. Follow emotional or evaluative content. When the owner says
+     something with feeling or judgment ("that would hurt", "I'm not
+     happy about it", "too much liability"), the next question is about
+     that, not a pivot away from it.
+
+  7. When pivoting to a new topic, just pivot. Do not invent a verbatim
+     phrase to echo just to soften the transition. Ask the new question
+     plainly. Required-field prompts in this file are pivots and are
+     written that way.
+
+  Continue prompts (use sparingly when the owner pauses on a thread that
+  is still producing captures): "Say more about that.", "Then what?",
+  "What happened next?".
+
+required_fields:
+  - id: five_year_picture
+    prompt: "Describe what winning looks like in 5 years across money, customer trust, employee retention, reputation, and your own time."
+    accepts: ["free_text", "i_dont_know", "not_applicable", "decline_to_answer"]
+    satisfied_when: "captured_items row exists with source_session=this AND keywords contains 'field:five_year_picture'"
+    follow_up_keywords: ["win", "winning", "five"]
+
+  - id: ranked_dimensions
+    prompt: "Rank those dimensions from most important to least."
+    accepts: ["free_text", "i_dont_know", "not_applicable", "decline_to_answer"]
+    satisfied_when: "captured_items row exists with source_session=this AND keywords contains 'field:ranked_dimensions'"
+    follow_up_keywords: ["rank", "priority"]
+
+  - id: refuse_outcome
+    prompt: "What does winning NOT look like? Describe outcomes you'd refuse even if they were profitable."
+    accepts: ["free_text", "i_dont_know", "not_applicable", "decline_to_answer"]
+    satisfied_when: "captured_items row exists with source_session=this AND keywords contains 'field:refuse_outcome'"
+    follow_up_keywords: ["refuse", "won't"]
+
+keywords:
+  win:
+    - priority: 1
+      template: "{phrase}. What does the first week of that look like?"
+    - priority: 2
+      template: "{phrase}. Who notices first?"
+
+  money:
+    - priority: 1
+      template: "{phrase}. What's the number that would feel like enough?"
+    - priority: 2
+      template: "{phrase}. Where does the next dollar go after that?"
+
+  family:
+    - priority: 1
+      template: "{phrase}. What's the current cost there you'd most want to undo?"
+    - priority: 2
+      template: "{phrase}. What would change at home if this worked?"
+
+  reputation:
+    - priority: 1
+      template: "{phrase}. Whose opinion do you most want to earn?"
+    - priority: 2
+      template: "{phrase}. Whose opinion would you most refuse to chase?"
+
+  freedom:
+    - priority: 1
+      template: "{phrase}. What would you do with the first free week?"
+    - priority: 2
+      template: "{phrase}. What would you stop doing entirely?"
+
+  sacrifice:
+    - priority: 1
+      template: "{phrase}. Which one are you currently sacrificing on purpose?"
+    - priority: 2
+      template: "{phrase}. Which one are you sacrificing without meaning to?"
+
+  refuse:
+    - priority: 1
+      template: "{phrase}. What's the deal that's already on the table you'd turn down?"
+    - priority: 2
+      template: "{phrase}. Why is that one a hard no?"
+
+  rank:
+    - priority: 1
+      template: "{phrase}. What forced that order?"
+    - priority: 2
+      template: "{phrase}. Which two are closest to switching places?"
+
+  customer:
+    - priority: 1
+      template: "{phrase}. How would your best customer describe the win?"
+    - priority: 2
+      template: "{phrase}. Which customer would you most want to keep for the next ten years?"
+
+fallbacks:
+  - "Describe a week five years from now that you would call a win."
+  - "Which of those dimensions are you currently sacrificing? Which are you currently overinvesting in?"
+  - "What does the worst-case acceptable outcome look like — still acceptable, but barely?"
+  - "Who else's life changes if this business reaches the picture you just described?"
+  - "What does freedom from this business look like, if it ever comes?"

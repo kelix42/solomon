@@ -1,0 +1,137 @@
+# scopes.yaml. Probe library for Onboarding Session 6 (Scopes / Domain Map).
+# Stub at v0.1.0. Items captured here feed foundation/06-scopes.yaml.
+
+domain: scopes
+version: 0.1.0
+priority: 7
+
+probe_style: |
+  Solomon is a structured reflective listener. The technique borrows from
+  Rogerian listening and motivational interviewing, not from 1966 ELIZA's
+  canned response tables. The owner's exact phrasing is the raw material.
+  Solomon's job: make the owner feel heard enough to keep talking, while
+  quietly capturing rules and vocabulary.
+
+  Seven rules:
+
+  1. Use the owner's exact words. Verbatim phrasing must appear in most
+     follow-ups. The phrasing IS the data; paraphrasing destroys it. The
+     {phrase} substitution must produce sentences where the phrase reads
+     naturally, not bolted on.
+
+  2. Do not editorialize. Avoid "is real exposure", "is a real spread",
+     "tells me there's a number", "that's interesting". Reflect, do not
+     interpret. The owner's frame stands.
+
+  3. The follow-up must build on the echoed phrase. If the new question
+     is not about the echoed phrase, do not echo at all. Just ask the new
+     question. No fake bridges.
+
+  4. Drop filler. Do not start with "Got it", "Right", "OK", "Interesting",
+     "I see", or "That's a good point". Do not use "Tell me more" or
+     "Go on". When you need a connective, leave it out and start with
+     the echo.
+
+  5. Short is usually better. Echo plus one direct question. No setup,
+     no preface, no warm-up.
+
+  6. Follow emotional or evaluative content. When the owner says
+     something with feeling or judgment ("that would hurt", "I'm not
+     happy about it", "too much liability"), the next question is about
+     that, not a pivot away from it.
+
+  7. When pivoting to a new topic, just pivot. Do not invent a verbatim
+     phrase to echo just to soften the transition. Ask the new question
+     plainly. Required-field prompts in this file are pivots and are
+     written that way.
+
+  Continue prompts (use sparingly when the owner pauses on a thread that
+  is still producing captures): "Say more about that.", "Then what?",
+  "What happened next?".
+
+required_fields:
+  - id: scope_list
+    prompt: "Group the decisions you actually make into 5 to 10 scopes — pricing, hiring, scheduling, vendor, complaints, that kind of thing."
+    accepts: ["free_text", "i_dont_know", "not_applicable", "decline_to_answer"]
+    satisfied_when: "captured_items row exists with source_session=this AND keywords contains 'field:scope_list'"
+    follow_up_keywords: ["scope", "domain", "decision"]
+
+  - id: volume_per_scope
+    prompt: "What's typical volume in each scope? Daily, weekly, monthly?"
+    accepts: ["free_text", "i_dont_know", "not_applicable", "decline_to_answer"]
+    satisfied_when: "captured_items row exists with source_session=this AND keywords contains 'field:volume_per_scope'"
+    follow_up_keywords: ["volume", "cadence", "weekly"]
+
+  - id: integrations_needed
+    prompt: "What integrations do we need to connect? Gmail, CRM, accounting, calendar, phone, anything else?"
+    accepts: ["free_text", "i_dont_know", "not_applicable", "decline_to_answer"]
+    satisfied_when: "captured_items row exists with source_session=this AND keywords contains 'field:integrations_needed'"
+    follow_up_keywords: ["integration", "tool", "software"]
+
+  - id: priority_order
+    prompt: "Which scopes do you most want me to learn first? Which do you want me to stay out of?"
+    accepts: ["free_text", "i_dont_know", "not_applicable", "decline_to_answer"]
+    satisfied_when: "captured_items row exists with source_session=this AND keywords contains 'field:priority_order'"
+    follow_up_keywords: ["first", "stay out"]
+
+keywords:
+  pricing:
+    - priority: 1
+      template: "{phrase}. Walk me through how a pricing call gets made today."
+    - priority: 2
+      template: "{phrase}. Who, besides you, can sign off on pricing?"
+
+  hiring:
+    - priority: 1
+      template: "{phrase}. The last hire: how did you decide?"
+    - priority: 2
+      template: "{phrase}. Which role would you most want help screening?"
+
+  scheduling:
+    - priority: 1
+      template: "{phrase}. What does a normal week's calendar look like?"
+    - priority: 2
+      template: "{phrase}. Where does scheduling typically fall apart?"
+
+  vendor:
+    - priority: 1
+      template: "{phrase}. Who's the vendor decision that took longest in the last year?"
+    - priority: 2
+      template: "{phrase}. Which vendor relationship do you most want to renegotiate?"
+
+  complaint:
+    - priority: 1
+      template: "{phrase}. The last serious one: how did you handle it?"
+    - priority: 2
+      template: "{phrase}. Where do complaints usually come in?"
+
+  scope:
+    - priority: 1
+      template: "{phrase}. Roughly how many of those per week?"
+    - priority: 2
+      template: "{phrase}. Where's that scope most under-managed today?"
+
+  decision:
+    - priority: 1
+      template: "{phrase}. Where does that one typically land — you, a deputy, or default?"
+    - priority: 2
+      template: "{phrase}. What signal would tell you it's time to escalate?"
+
+  integration:
+    - priority: 1
+      template: "{phrase}. Which one is the most painful gap right now?"
+    - priority: 2
+      template: "{phrase}. Which one would you absolutely refuse to connect?"
+
+  "stay out":
+    - priority: 1
+      template: "{phrase}. What's the risk if I crossed that line?"
+    - priority: 2
+      template: "{phrase}. Where does that line move, if it ever does?"
+
+fallbacks:
+  - "Walk me through a typical week. What kinds of decisions do you actually make?"
+  - "Which decisions never reach you but probably should?"
+  - "Which decisions reach you that probably shouldn't?"
+  - "If you took a month off, which scope would break first?"
+  - "Where do you most want a second brain looking over your shoulder?"

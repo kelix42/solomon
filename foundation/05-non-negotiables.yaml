@@ -1,0 +1,19 @@
+# 05-non-negotiables.yaml — derived summary AND deterministic hard-rule source for §2.2.5 Stage 4.
+# Stage 4 reads `rules:` only and evaluates `condition` as JSON-logic. captured_items.conditions is prose-only.
+# Promotion to a hard rule requires owner confirmation in mentoring (proposed_rules -> confirmed -> here).
+
+last_updated: null
+raw_notes: |
+
+rules:
+  # Example (delete and replace with owner's actual rules):
+  # - id: 01HX0SOMERULEID
+  #   statement: "Never quote below cost+15% on commercial jobs."
+  #   domain: pricing
+  #   condition:
+  #     and:
+  #       - { "==": [{ var: "event.classification.scope" }, "pricing"] }
+  #       - { "<":  [{ var: "event.payload.margin_pct" }, 15] }
+  #   on_violate:
+  #     action: REJECT
+  #     explanation: "Below 15% margin on commercial work — see captured_items.id 01HX0SOMERULEID."

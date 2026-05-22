@@ -1,0 +1,12 @@
+# 06-scopes.yaml. Derived summary; canonical store is db/schemas/captured_items.sql.
+# Topics: departments, operational_scopes (each captured row's statement is JSON {name, department}), customer_segments_named.
+# Filled by solomon-onboarding-06-scopes or by intake.md plus solomon-extraction.
+# Sleep-Cycle Job 12 (yaml-reconcile) catches drift; DB-wins per §1.
+# Note: this session also writes one row per captured operational_scope to
+# db.scope_autonomy at level=0 per SOLOMON-PLAN.md §2.11 (every scope starts
+# at L0; promotion is performance-driven via Sleep-Cycle Job 7).
+
+last_updated: null
+
+# (placeholder; filled at end-of-onboarding from captured_items rows where domain matches this YAML)
+raw_notes: |

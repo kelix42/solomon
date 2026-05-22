@@ -1,350 +1,501 @@
--- Solomon storage schema
--- Postgres with pgvector extension. Compatible with local Postgres (Docker)
--- and managed Supabase.
+-- Solomon unified schema
+-- Default backend: SQLite (single file at ~/.hermes/solomon/solomon.db).
+-- Opt-in backend: Postgres (via SOLOMON_DB_URL=postgresql://...).
 --
--- Every table here corresponds to something in Part 17 of the design doc.
--- Keep this file as the single source of truth for the schema. Migrations
--- live in solomon/storage/migrations/ and are numbered.
+-- This file is written in SQLite dialect with `INTEGER PRIMARY KEY AUTOINCREMENT`
+-- where Postgres would use `BIGSERIAL`. SQLite ignores AUTOINCREMENT semantics
+-- but treats INTEGER PK as autoincrement. Postgres treats it as a normal int.
+-- The Postgres overlay (schema_postgres.sql) handles the swap when needed.
+--
+-- All tables are tenant-scoped via tenant_id. Single-tenant installs default
+-- tenant_id='default'.
 
-CREATE EXTENSION IF NOT EXISTS vector;
-CREATE EXTENSION IF NOT EXISTS pg_trgm;
-
--- --------------------------------------------------------------------------
--- Tenants
--- --------------------------------------------------------------------------
+-- ===========================================================================
+-- Tenant
+-- ===========================================================================
 CREATE TABLE IF NOT EXISTS tenants (
     tenant_id           TEXT PRIMARY KEY,
     business_name       TEXT NOT NULL,
     timezone            TEXT NOT NULL DEFAULT 'UTC',
     industry            TEXT,
     sub_specialty       TEXT,
-    onboarded_at        TIMESTAMPTZ,
-    created_at          TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    onboarded_at        TEXT,
+    created_at          TEXT NOT NULL DEFAULT (datetime('now'))
 );
+INSERT OR IGNORE INTO tenants (tenant_id, business_name) VALUES ('default', 'My Business');
 
--- --------------------------------------------------------------------------
--- Raw events (Part 2)
--- --------------------------------------------------------------------------
-CREATE TABLE IF NOT EXISTS raw_events (
-    event_id            TEXT PRIMARY KEY,
+-- ===========================================================================
+-- Raw events + Decision events
+-- ===========================================================================
+
+-- One row per gateway / capture event. The pipeline reads this.
+CREATE TABLE IF NOT EXISTS events (
+    event_id            TEXT PRIMARY KEY,        -- ulid
     tenant_id           TEXT NOT NULL REFERENCES tenants(tenant_id),
-    source              TEXT NOT NULL,
-    received_at         TIMESTAMPTZ NOT NULL,
-    participants        JSONB NOT NULL DEFAULT '[]'::jsonb,
+    source              TEXT NOT NULL,           -- telegram, plaud, gmail, file_dropped, manual, cli, ...
+    received_at         TEXT NOT NULL,
+    participants        TEXT NOT NULL DEFAULT '[]',   -- JSON
     raw_content         TEXT NOT NULL,
-    channel_metadata    JSONB NOT NULL DEFAULT '{}'::jsonb,
-    salience_score      NUMERIC(4,3),
-    processed_at        TIMESTAMPTZ,
-    private             BOOLEAN NOT NULL DEFAULT FALSE
+    channel_metadata    TEXT NOT NULL DEFAULT '{}',   -- JSON
+    salience_score      REAL,
+    classification      TEXT,                    -- JSON {scope, domain, decision_type}
+    hard_rule_verdict   TEXT,                    -- 'pass' | 'block' | NULL
+    hard_rule_reason    TEXT,
+    retrieval_context   TEXT,                    -- JSON
+    system1_output      TEXT,
+    system2_output      TEXT,
+    divergence_score    REAL,
+    audit_verdict       TEXT,                    -- approve | downgrade | reject | request_rethink
+    audit_reasoning     TEXT,
+    owner_state         TEXT,                    -- green | yellow | red | unknown
+    action_taken        TEXT,
+    stage_timings_ms    TEXT NOT NULL DEFAULT '{}',   -- JSON {stage_name: ms}
+    status              TEXT NOT NULL DEFAULT 'pending',
+                              -- pending | in_progress | complete | skipped | blocked_by_hard_rule | failed
+    private             INTEGER NOT NULL DEFAULT 0,   -- bool
+    created_at          TEXT NOT NULL DEFAULT (datetime('now')),
+    completed_at        TEXT
 );
-CREATE INDEX IF NOT EXISTS idx_raw_events_tenant_received ON raw_events(tenant_id, received_at DESC);
-CREATE INDEX IF NOT EXISTS idx_raw_events_source ON raw_events(source);
+CREATE INDEX IF NOT EXISTS idx_events_tenant_received ON events(tenant_id, received_at DESC);
+CREATE INDEX IF NOT EXISTS idx_events_status ON events(status);
+CREATE INDEX IF NOT EXISTS idx_events_source ON events(source);
 
--- --------------------------------------------------------------------------
--- Decisions (Part 12)
--- --------------------------------------------------------------------------
+-- The H2 decision log mirror. Append-only. One row per completed event.
 CREATE TABLE IF NOT EXISTS decisions (
-    decision_id                 BIGSERIAL PRIMARY KEY,
+    decision_id                 INTEGER PRIMARY KEY AUTOINCREMENT,
     tenant_id                   TEXT NOT NULL REFERENCES tenants(tenant_id),
-    event_id                    TEXT REFERENCES raw_events(event_id),
+    event_id                    TEXT REFERENCES events(event_id),
     scope                       TEXT,
     domain                      TEXT,
     decision_type               TEXT,
-    classification_confidence   NUMERIC(4,3),
-    salience_score              NUMERIC(4,3),
-    working_memory_used         BOOLEAN NOT NULL DEFAULT FALSE,
-    retrieval_lanes_used        JSONB NOT NULL DEFAULT '[]'::jsonb,
-    heuristics_referenced       JSONB NOT NULL DEFAULT '[]'::jsonb,
-    similar_decisions_referenced JSONB NOT NULL DEFAULT '[]'::jsonb,
-    foundation_files_used       JSONB NOT NULL DEFAULT '[]'::jsonb,
+    classification_confidence   REAL,
+    salience_score              REAL,
+    working_memory_used         INTEGER NOT NULL DEFAULT 0,
+    retrieval_lanes_used        TEXT NOT NULL DEFAULT '[]',
+    heuristics_referenced       TEXT NOT NULL DEFAULT '[]',
+    similar_decisions_referenced TEXT NOT NULL DEFAULT '[]',
+    foundation_files_used       TEXT NOT NULL DEFAULT '[]',
     system_1_answer             TEXT,
     system_2_answer             TEXT,
-    divergence_score            NUMERIC(4,3),
+    divergence_score            REAL,
     proposed_action             TEXT,
     audit_verdict               TEXT,
     audit_reasoning             TEXT,
     final_action                TEXT,
     autonomy_level_at_time      TEXT,
-    owner_action                TEXT,
-    historical                  BOOLEAN NOT NULL DEFAULT FALSE,
-    created_at                  TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    owner_action                TEXT,            -- approved | edited | rejected | expired | NULL
+    historical                  INTEGER NOT NULL DEFAULT 0,
+    created_at                  TEXT NOT NULL DEFAULT (datetime('now'))
 );
 CREATE INDEX IF NOT EXISTS idx_decisions_tenant_created ON decisions(tenant_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_decisions_scope ON decisions(tenant_id, scope);
-CREATE INDEX IF NOT EXISTS idx_decisions_divergence ON decisions(divergence_score DESC) WHERE divergence_score IS NOT NULL;
 
--- --------------------------------------------------------------------------
--- Heuristics (Part 24)
--- --------------------------------------------------------------------------
+-- Legacy alias (some older modules wrote into raw_events). Map to events.
+CREATE VIEW IF NOT EXISTS raw_events AS
+SELECT event_id, tenant_id, source, received_at, participants, raw_content,
+       channel_metadata, salience_score, completed_at AS processed_at, private
+FROM events;
+
+-- ===========================================================================
+-- Interview phase
+-- ===========================================================================
+
+-- Owner-stated rules captured during interview / mentoring sessions.
+CREATE TABLE IF NOT EXISTS captured_items (
+    id                  TEXT PRIMARY KEY,       -- ulid
+    tenant_id           TEXT NOT NULL REFERENCES tenants(tenant_id),
+    session_id          TEXT,                   -- FK to sessions; nullable for back-fill
+    domain              TEXT NOT NULL,
+    type                TEXT NOT NULL,          -- belief | principle | non_negotiable | preference | rule | example | constraint | metric | vocabulary
+    statement           TEXT NOT NULL,
+    verbatim_phrase     TEXT NOT NULL,
+    example             TEXT,
+    keywords            TEXT NOT NULL DEFAULT '[]',   -- JSON
+    confidence          TEXT NOT NULL DEFAULT 'stated',  -- stated | repeated | exemplified
+    conflicts_with      TEXT NOT NULL DEFAULT '[]',   -- JSON list of captured_items.id
+    source_session      TEXT,                   -- onboarding-NN, mentoring-YYYYMMDD, etc.
+    embedded_at         TEXT,
+    created_at          TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_captured_tenant_domain ON captured_items(tenant_id, domain);
+CREATE INDEX IF NOT EXISTS idx_captured_pending_embed ON captured_items(embedded_at) WHERE embedded_at IS NULL;
+CREATE INDEX IF NOT EXISTS idx_captured_session ON captured_items(session_id);
+
+-- Owner vocabulary (per-tenant phrase frequency).
+CREATE TABLE IF NOT EXISTS vocabulary (
+    tenant_id           TEXT NOT NULL REFERENCES tenants(tenant_id),
+    phrase              TEXT NOT NULL,
+    normalised          TEXT NOT NULL,
+    kind                TEXT NOT NULL,           -- noun_phrase | verb_phrase | idiom | metaphor | metric
+    frequency           INTEGER NOT NULL DEFAULT 1,
+    first_seen          TEXT NOT NULL DEFAULT (datetime('now')),
+    last_seen           TEXT NOT NULL DEFAULT (datetime('now')),
+    example_source_id   TEXT,                    -- a captured_items.id where this first appeared
+    PRIMARY KEY (tenant_id, normalised)
+);
+CREATE INDEX IF NOT EXISTS idx_vocab_freq ON vocabulary(tenant_id, frequency DESC);
+
+-- Coverage tracker per (session, domain, sub_topic).
+CREATE TABLE IF NOT EXISTS coverage (
+    coverage_id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    tenant_id           TEXT NOT NULL REFERENCES tenants(tenant_id),
+    session_id          TEXT NOT NULL,
+    domain              TEXT NOT NULL,
+    sub_topic           TEXT NOT NULL,
+    probes_asked        INTEGER NOT NULL DEFAULT 0,
+    items_captured      INTEGER NOT NULL DEFAULT 0,
+    gap_score           REAL NOT NULL DEFAULT 1.0,    -- 1.0 = unprobed, 0.0 = saturated
+    turns_since_last_capture INTEGER NOT NULL DEFAULT 0,
+    library_version_seen TEXT,
+    last_updated        TEXT NOT NULL DEFAULT (datetime('now')),
+    UNIQUE (tenant_id, session_id, domain, sub_topic)
+);
+CREATE INDEX IF NOT EXISTS idx_coverage_session ON coverage(tenant_id, session_id);
+
+-- Real-time same-session contradiction queue. The owner resolves these
+-- IN the conversation, not later.
+CREATE TABLE IF NOT EXISTS clarification_queue (
+    clarification_id    INTEGER PRIMARY KEY AUTOINCREMENT,
+    tenant_id           TEXT NOT NULL REFERENCES tenants(tenant_id),
+    session_id          TEXT NOT NULL,
+    new_item_id         TEXT NOT NULL REFERENCES captured_items(id),
+    conflicting_item_id TEXT NOT NULL REFERENCES captured_items(id),
+    reason              TEXT NOT NULL,
+    status              TEXT NOT NULL DEFAULT 'pending',  -- pending | resolved | deferred
+    resolution          TEXT,                    -- which side won, or new merged statement
+    created_at          TEXT NOT NULL DEFAULT (datetime('now')),
+    resolved_at         TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_clarif_pending ON clarification_queue(tenant_id, status);
+
+-- Onboarding / mentoring sessions.
+CREATE TABLE IF NOT EXISTS sessions (
+    session_id          TEXT PRIMARY KEY,        -- e.g. onboarding-00-industry
+    tenant_id           TEXT NOT NULL REFERENCES tenants(tenant_id),
+    domain              TEXT NOT NULL,
+    mode                TEXT NOT NULL DEFAULT 'onboarding',   -- onboarding | mentoring | level_up
+    status              TEXT NOT NULL DEFAULT 'open',         -- open | complete | abandoned
+    library_version     TEXT,
+    started_at          TEXT NOT NULL DEFAULT (datetime('now')),
+    completed_at        TEXT,
+    items_captured      INTEGER NOT NULL DEFAULT 0,
+    turn_count          INTEGER NOT NULL DEFAULT 0
+);
+
+-- ===========================================================================
+-- Heuristics (rules)
+-- ===========================================================================
 CREATE TABLE IF NOT EXISTS heuristics (
-    heuristic_id        BIGSERIAL PRIMARY KEY,
+    heuristic_id        INTEGER PRIMARY KEY AUTOINCREMENT,
     tenant_id           TEXT NOT NULL REFERENCES tenants(tenant_id),
     scope               TEXT NOT NULL,
     domain              TEXT,
     condition           TEXT NOT NULL,
     action              TEXT NOT NULL,
     reasoning           TEXT,
-    confidence          NUMERIC(4,3) NOT NULL DEFAULT 0.5,
-    last_used_at        TIMESTAMPTZ,
-    last_retrieved_at   TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    last_updated_at     TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    confidence          REAL NOT NULL DEFAULT 0.5,
+    last_used_at        TEXT,
+    last_retrieved_at   TEXT NOT NULL DEFAULT (datetime('now')),
+    last_updated_at     TEXT NOT NULL DEFAULT (datetime('now')),
     source              TEXT NOT NULL,
-    provenance          JSONB NOT NULL DEFAULT '{}'::jsonb,
-    status              TEXT NOT NULL DEFAULT 'active',
+    provenance          TEXT NOT NULL DEFAULT '{}',
+    status              TEXT NOT NULL DEFAULT 'active',  -- active | fragile | archived | superseded
     version             INTEGER NOT NULL DEFAULT 1,
-    superseded_by       BIGINT REFERENCES heuristics(heuristic_id),
-    created_at          TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    superseded_by       INTEGER REFERENCES heuristics(heuristic_id),
+    created_at          TEXT NOT NULL DEFAULT (datetime('now'))
 );
-CREATE INDEX IF NOT EXISTS idx_heuristics_tenant_scope ON heuristics(tenant_id, scope, status);
-CREATE INDEX IF NOT EXISTS idx_heuristics_status ON heuristics(status);
+CREATE INDEX IF NOT EXISTS idx_heur_tenant_scope ON heuristics(tenant_id, scope, status);
 
--- Pending heuristics (proposed by surprise replay or ingestion miner, not yet approved)
+-- Pending heuristics waiting on owner approval.
 CREATE TABLE IF NOT EXISTS pending_heuristics (
-    pending_id          BIGSERIAL PRIMARY KEY,
+    pending_id          INTEGER PRIMARY KEY AUTOINCREMENT,
     tenant_id           TEXT NOT NULL REFERENCES tenants(tenant_id),
     scope               TEXT NOT NULL,
     proposed_condition  TEXT NOT NULL,
     proposed_action     TEXT NOT NULL,
-    source              TEXT NOT NULL,
+    source              TEXT NOT NULL,           -- ingestion_miner | corpus_rule | surprise_replay
     support_count       INTEGER NOT NULL DEFAULT 1,
-    evidence_list       JSONB NOT NULL DEFAULT '[]'::jsonb,
+    evidence_list       TEXT NOT NULL DEFAULT '[]',
     status              TEXT NOT NULL DEFAULT 'pending',
-    created_at          TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    created_at          TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
--- --------------------------------------------------------------------------
--- Skills (Part 17)
--- --------------------------------------------------------------------------
+-- Rules buried in corpus material, surfaced for owner review (Drive port).
+CREATE TABLE IF NOT EXISTS proposed_rules (
+    id                  TEXT PRIMARY KEY,        -- ulid
+    tenant_id           TEXT NOT NULL REFERENCES tenants(tenant_id),
+    domain              TEXT NOT NULL,
+    proposed_statement  TEXT NOT NULL,
+    verbatim_excerpt    TEXT NOT NULL,
+    source_path         TEXT NOT NULL,
+    keywords            TEXT NOT NULL DEFAULT '[]',
+    confidence_hint     TEXT,                    -- stated | repeated | exemplified
+    status              TEXT NOT NULL DEFAULT 'queued',
+    created_at          TEXT NOT NULL DEFAULT (datetime('now')),
+    UNIQUE (source_path, verbatim_excerpt)
+);
+
+-- Owner queue (contradictions, rule proposals, drift checks, etc.)
+CREATE TABLE IF NOT EXISTS mentoring_queue (
+    id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+    tenant_id           TEXT NOT NULL REFERENCES tenants(tenant_id),
+    source              TEXT NOT NULL,           -- corpus_rule_proposal | contradiction | drift | promotion_ready | demotion_alert
+    surfaced_at         TEXT NOT NULL DEFAULT (datetime('now')),
+    status              TEXT NOT NULL DEFAULT 'queued',
+    priority            INTEGER NOT NULL DEFAULT 5,
+    payload             TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_mentq_status ON mentoring_queue(tenant_id, status, priority);
+
+-- ===========================================================================
+-- Skills (multi-step playbooks)
+-- ===========================================================================
 CREATE TABLE IF NOT EXISTS skills (
-    skill_id            BIGSERIAL PRIMARY KEY,
+    skill_id            INTEGER PRIMARY KEY AUTOINCREMENT,
     tenant_id           TEXT NOT NULL REFERENCES tenants(tenant_id),
     scope               TEXT NOT NULL,
     domain              TEXT,
     name                TEXT NOT NULL,
     trigger_condition   TEXT,
-    steps               JSONB NOT NULL,
+    steps               TEXT NOT NULL,
     success_criteria    TEXT,
-    source_decisions    JSONB NOT NULL DEFAULT '[]'::jsonb,
-    confidence          NUMERIC(4,3) NOT NULL DEFAULT 0.5,
+    source_decisions    TEXT NOT NULL DEFAULT '[]',
+    confidence          REAL NOT NULL DEFAULT 0.5,
     version             INTEGER NOT NULL DEFAULT 1,
-    created_at          TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    created_at          TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
--- --------------------------------------------------------------------------
--- Predictions (Part 13)
--- --------------------------------------------------------------------------
+-- ===========================================================================
+-- Predictions + counterfactuals
+-- ===========================================================================
 CREATE TABLE IF NOT EXISTS predictions (
-    prediction_id       BIGSERIAL PRIMARY KEY,
+    prediction_id       INTEGER PRIMARY KEY AUTOINCREMENT,
     tenant_id           TEXT NOT NULL REFERENCES tenants(tenant_id),
-    decision_id         BIGINT NOT NULL REFERENCES decisions(decision_id),
+    decision_id         INTEGER NOT NULL REFERENCES decisions(decision_id),
     prediction_text     TEXT NOT NULL,
-    expected_by         TIMESTAMPTZ NOT NULL,
-    status              TEXT NOT NULL DEFAULT 'pending',
+    expected_by         TEXT NOT NULL,
+    status              TEXT NOT NULL DEFAULT 'pending',  -- pending | met | missed | partial | unresolved
     actual_outcome      TEXT,
-    checked_at          TIMESTAMPTZ,
-    created_at          TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    checked_at          TEXT,
+    created_at          TEXT NOT NULL DEFAULT (datetime('now'))
 );
-CREATE INDEX IF NOT EXISTS idx_predictions_pending ON predictions(status, expected_by) WHERE status = 'pending';
+CREATE INDEX IF NOT EXISTS idx_pred_pending ON predictions(status, expected_by);
 
--- --------------------------------------------------------------------------
--- Counterfactuals (Part 13)
--- --------------------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS counterfactuals (
-    counterfactual_id           BIGSERIAL PRIMARY KEY,
+    counterfactual_id           INTEGER PRIMARY KEY AUTOINCREMENT,
     tenant_id                   TEXT NOT NULL REFERENCES tenants(tenant_id),
-    decision_id                 BIGINT NOT NULL REFERENCES decisions(decision_id),
+    decision_id                 INTEGER NOT NULL REFERENCES decisions(decision_id),
     alternative_choice          TEXT NOT NULL,
     predicted_outcome           TEXT,
-    evaluated_at                TIMESTAMPTZ,
-    would_have_been_better      BOOLEAN,
-    created_at                  TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    evaluated_at                TEXT,
+    would_have_been_better      INTEGER,
+    created_at                  TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
--- --------------------------------------------------------------------------
--- Mentoring sessions (Part 14)
--- --------------------------------------------------------------------------
-CREATE TABLE IF NOT EXISTS mentoring_sessions (
-    session_id          BIGSERIAL PRIMARY KEY,
-    tenant_id           TEXT NOT NULL REFERENCES tenants(tenant_id),
-    scheduled_at        TIMESTAMPTZ NOT NULL,
-    completed_at        TIMESTAMPTZ,
-    questions           JSONB NOT NULL DEFAULT '[]'::jsonb,
-    answers             JSONB NOT NULL DEFAULT '[]'::jsonb,
-    heuristics_created  JSONB NOT NULL DEFAULT '[]'::jsonb,
-    heuristics_updated  JSONB NOT NULL DEFAULT '[]'::jsonb,
-    foundation_updates  JSONB NOT NULL DEFAULT '[]'::jsonb,
-    mode                TEXT NOT NULL DEFAULT 'ongoing',
-    created_at          TIMESTAMPTZ NOT NULL DEFAULT NOW()
-);
-
--- --------------------------------------------------------------------------
--- Audit log (Part 10)
--- --------------------------------------------------------------------------
+-- ===========================================================================
+-- Audit + approvals + autonomy
+-- ===========================================================================
 CREATE TABLE IF NOT EXISTS audit_log (
-    audit_id            BIGSERIAL PRIMARY KEY,
+    audit_id            INTEGER PRIMARY KEY AUTOINCREMENT,
     tenant_id           TEXT NOT NULL REFERENCES tenants(tenant_id),
-    decision_id         BIGINT REFERENCES decisions(decision_id),
+    decision_id         INTEGER REFERENCES decisions(decision_id),
     verdict             TEXT NOT NULL,
     reasoning           TEXT,
     model_used          TEXT,
-    audited_at          TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    audited_at          TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
--- --------------------------------------------------------------------------
--- Pending approvals (Part 11)
--- --------------------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS pending_approvals (
-    approval_id         BIGSERIAL PRIMARY KEY,
+    approval_id         INTEGER PRIMARY KEY AUTOINCREMENT,
     tenant_id           TEXT NOT NULL REFERENCES tenants(tenant_id),
-    decision_id         BIGINT NOT NULL REFERENCES decisions(decision_id),
+    decision_id         INTEGER NOT NULL REFERENCES decisions(decision_id),
     proposed_action     TEXT NOT NULL,
-    expires_at          TIMESTAMPTZ NOT NULL,
+    expires_at          TEXT NOT NULL,
     status              TEXT NOT NULL DEFAULT 'pending',
-    created_at          TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    created_at          TEXT NOT NULL DEFAULT (datetime('now'))
 );
-CREATE INDEX IF NOT EXISTS idx_pending_approvals_status ON pending_approvals(tenant_id, status, expires_at);
 
--- --------------------------------------------------------------------------
--- Autonomy state (Part 11)
--- --------------------------------------------------------------------------
-CREATE TABLE IF NOT EXISTS autonomy_state (
+-- L0-L4 per scope (Drive's autonomy_state).
+CREATE TABLE IF NOT EXISTS scope_autonomy (
     tenant_id           TEXT NOT NULL REFERENCES tenants(tenant_id),
     scope               TEXT NOT NULL,
-    level               TEXT NOT NULL DEFAULT 'watch',
-    since               TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    last_promoted_at    TIMESTAMPTZ,
-    last_demoted_at     TIMESTAMPTZ,
-    override_rate_7d    NUMERIC(4,3),
-    override_rate_30d   NUMERIC(4,3),
+    level               TEXT NOT NULL DEFAULT 'L0',  -- L0 | L1 | L2 | L3 | L4
+    since               TEXT NOT NULL DEFAULT (datetime('now')),
+    last_promoted_at    TEXT,
+    last_demoted_at     TEXT,
+    override_rate_7d    REAL,
+    override_rate_30d   REAL,
     PRIMARY KEY (tenant_id, scope)
 );
 
--- --------------------------------------------------------------------------
--- Regret signals (Part 16, Job 1)
--- --------------------------------------------------------------------------
-CREATE TABLE IF NOT EXISTS regret_signals (
-    regret_id           BIGSERIAL PRIMARY KEY,
+-- Owner-state-modulated ceiling. Stage 9 of the pipeline reads this.
+-- v1 default: always 'unknown' which maps to no ceiling (green).
+CREATE TABLE IF NOT EXISTS biometrics (
+    biometric_id        INTEGER PRIMARY KEY AUTOINCREMENT,
     tenant_id           TEXT NOT NULL REFERENCES tenants(tenant_id),
-    decision_id         BIGINT NOT NULL REFERENCES decisions(decision_id),
-    heuristic_id        BIGINT REFERENCES heuristics(heuristic_id),
-    failure_layer       TEXT,
-    created_at          TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    recorded_at         TEXT NOT NULL DEFAULT (datetime('now')),
+    state               TEXT NOT NULL,           -- green | yellow | red | unknown
+    source              TEXT,                    -- whoop | manual | derived
+    payload             TEXT NOT NULL DEFAULT '{}'
+);
+CREATE INDEX IF NOT EXISTS idx_biom_recent ON biometrics(tenant_id, recorded_at DESC);
+
+-- ===========================================================================
+-- Sleep cycle bookkeeping
+-- ===========================================================================
+CREATE TABLE IF NOT EXISTS regret_signals (
+    regret_id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    tenant_id           TEXT NOT NULL REFERENCES tenants(tenant_id),
+    decision_id         INTEGER NOT NULL REFERENCES decisions(decision_id),
+    heuristic_id        INTEGER REFERENCES heuristics(heuristic_id),
+    failure_layer       TEXT,                    -- heuristic | audit_gate | autonomy_level | action_layer
+    created_at          TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
--- --------------------------------------------------------------------------
--- Fragility log (Part 16, Job 4)
--- --------------------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS fragility_log (
-    fragility_id        BIGSERIAL PRIMARY KEY,
+    fragility_id        INTEGER PRIMARY KEY AUTOINCREMENT,
     tenant_id           TEXT NOT NULL REFERENCES tenants(tenant_id),
-    heuristic_id        BIGINT NOT NULL REFERENCES heuristics(heuristic_id),
+    heuristic_id        INTEGER NOT NULL REFERENCES heuristics(heuristic_id),
     mutation            TEXT NOT NULL,
     new_action          TEXT,
-    created_at          TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    created_at          TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
--- --------------------------------------------------------------------------
--- Private sessions (Part 4 — kill switch audit trail)
--- We log start/end + turn count only, NEVER content.
--- --------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS cycle_log (
+    cycle_id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    tenant_id           TEXT NOT NULL REFERENCES tenants(tenant_id),
+    started_at          TEXT NOT NULL,
+    ended_at            TEXT,
+    total_tokens        INTEGER NOT NULL DEFAULT 0,
+    per_job             TEXT NOT NULL DEFAULT '{}'
+);
+
 CREATE TABLE IF NOT EXISTS private_sessions (
-    private_id          BIGSERIAL PRIMARY KEY,
+    private_id          INTEGER PRIMARY KEY AUTOINCREMENT,
     tenant_id           TEXT NOT NULL REFERENCES tenants(tenant_id),
     session_id          TEXT,
-    started_at          TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    ended_at            TIMESTAMPTZ,
+    started_at          TEXT NOT NULL DEFAULT (datetime('now')),
+    ended_at            TEXT,
     turn_count          INTEGER NOT NULL DEFAULT 0
 );
 
--- --------------------------------------------------------------------------
--- Cycle log (Part 16 — nightly sleep cycle outcomes)
--- --------------------------------------------------------------------------
-CREATE TABLE IF NOT EXISTS cycle_log (
-    cycle_id            BIGSERIAL PRIMARY KEY,
-    tenant_id           TEXT NOT NULL REFERENCES tenants(tenant_id),
-    started_at          TIMESTAMPTZ NOT NULL,
-    ended_at            TIMESTAMPTZ,
-    total_tokens        BIGINT NOT NULL DEFAULT 0,
-    per_job             JSONB NOT NULL DEFAULT '{}'::jsonb
-);
-
--- --------------------------------------------------------------------------
--- Embeddings (Part 17)
--- --------------------------------------------------------------------------
-CREATE TABLE IF NOT EXISTS embeddings (
-    embedding_id        BIGSERIAL PRIMARY KEY,
-    tenant_id           TEXT NOT NULL REFERENCES tenants(tenant_id),
-    source_table        TEXT NOT NULL,
-    source_id           BIGINT NOT NULL,
-    vector              vector(384),
-    created_at          TIMESTAMPTZ NOT NULL DEFAULT NOW()
-);
-CREATE INDEX IF NOT EXISTS idx_embeddings_lookup ON embeddings(tenant_id, source_table, source_id);
--- Build an HNSW index for fast vector similarity. Cosine distance is the
--- default we'll use in retrieval; switch to l2 if a tenant overrides.
-CREATE INDEX IF NOT EXISTS idx_embeddings_vector_hnsw ON embeddings USING hnsw (vector vector_cosine_ops);
-
--- --------------------------------------------------------------------------
--- Working memory (Part 7) — Postgres TTL fallback when Redis isn't available
--- --------------------------------------------------------------------------
+-- ===========================================================================
+-- Working memory (the hot cache)
+-- ===========================================================================
 CREATE TABLE IF NOT EXISTS working_memory (
     wm_key              TEXT NOT NULL,
     tenant_id           TEXT NOT NULL REFERENCES tenants(tenant_id),
-    payload             JSONB NOT NULL,
-    salience            NUMERIC(4,3) NOT NULL DEFAULT 0.5,
-    last_touched_at     TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    expires_at          TIMESTAMPTZ NOT NULL,
+    payload             TEXT NOT NULL,
+    salience            REAL NOT NULL DEFAULT 0.5,
+    last_touched_at     TEXT NOT NULL DEFAULT (datetime('now')),
+    expires_at          TEXT NOT NULL,
     PRIMARY KEY (tenant_id, wm_key)
 );
 CREATE INDEX IF NOT EXISTS idx_wm_expires ON working_memory(expires_at);
 
--- --------------------------------------------------------------------------
--- Open items (Part 7) — kept open longer than the WM TTL
--- --------------------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS open_items (
-    item_id             BIGSERIAL PRIMARY KEY,
+    item_id             INTEGER PRIMARY KEY AUTOINCREMENT,
     tenant_id           TEXT NOT NULL REFERENCES tenants(tenant_id),
     scope               TEXT NOT NULL,
     description         TEXT,
-    related_decision_id BIGINT REFERENCES decisions(decision_id),
-    opened_at           TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    closed_at           TIMESTAMPTZ
+    related_decision_id INTEGER REFERENCES decisions(decision_id),
+    opened_at           TEXT NOT NULL DEFAULT (datetime('now')),
+    closed_at           TEXT
 );
 
--- --------------------------------------------------------------------------
--- Ingestion jobs and documents (Part 26)
--- --------------------------------------------------------------------------
+-- ===========================================================================
+-- Corpus + ingestion (Drive's Karpathy LLM-Wiki pattern + our ingestion)
+-- ===========================================================================
+
+-- File-level manifest with sha256 dedup (Drive port).
+CREATE TABLE IF NOT EXISTS ingested_files (
+    id                  TEXT PRIMARY KEY,        -- ulid
+    tenant_id           TEXT NOT NULL REFERENCES tenants(tenant_id),
+    sha256              TEXT NOT NULL UNIQUE,
+    inbox_path_at_ingest TEXT NOT NULL,
+    raw_path            TEXT,
+    size_bytes          INTEGER NOT NULL,
+    category            TEXT NOT NULL,           -- sops | emails | messages | docs | data
+    status              TEXT NOT NULL,           -- pending | in_progress | success | partial | failed | forgotten
+    vector_count        INTEGER,
+    wiki_pages_touched  TEXT,                    -- JSON list of wiki page paths
+    error_message       TEXT,
+    ingested_at         TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+-- Ingestion job + per-document manifest (our existing pattern).
 CREATE TABLE IF NOT EXISTS ingestion_jobs (
-    job_id              BIGSERIAL PRIMARY KEY,
+    job_id              INTEGER PRIMARY KEY AUTOINCREMENT,
     tenant_id           TEXT NOT NULL REFERENCES tenants(tenant_id),
     status              TEXT NOT NULL DEFAULT 'queued',
     document_count      INTEGER NOT NULL DEFAULT 0,
-    started_at          TIMESTAMPTZ,
-    finished_at         TIMESTAMPTZ,
-    created_at          TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    started_at          TEXT,
+    finished_at         TEXT,
+    created_at          TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
 CREATE TABLE IF NOT EXISTS ingestion_documents (
-    document_id         BIGSERIAL PRIMARY KEY,
-    job_id              BIGINT NOT NULL REFERENCES ingestion_jobs(job_id),
+    document_id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    job_id              INTEGER NOT NULL REFERENCES ingestion_jobs(job_id),
     tenant_id           TEXT NOT NULL REFERENCES tenants(tenant_id),
     storage_path        TEXT NOT NULL,
     document_type       TEXT,
-    period_start        TIMESTAMPTZ,
-    period_end          TIMESTAMPTZ,
-    participants        JSONB NOT NULL DEFAULT '[]'::jsonb,
+    period_start        TEXT,
+    period_end          TEXT,
+    participants        TEXT NOT NULL DEFAULT '[]',
     domain              TEXT,
-    salience_estimate   NUMERIC(4,3),
+    salience_estimate   REAL,
     status              TEXT NOT NULL DEFAULT 'queued',
-    created_at          TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    created_at          TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
--- --------------------------------------------------------------------------
+-- Wiki section-hash tracking (Drive's section-hash diff approach).
+CREATE TABLE IF NOT EXISTS wiki_vectors (
+    page_path           TEXT PRIMARY KEY,
+    tenant_id           TEXT NOT NULL REFERENCES tenants(tenant_id),
+    section_hashes      TEXT NOT NULL DEFAULT '{}',
+    last_updated        TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+-- Plaud IMAP worker state.
+CREATE TABLE IF NOT EXISTS plaud_state (
+    id                  INTEGER PRIMARY KEY DEFAULT 1,
+    tenant_id           TEXT NOT NULL,
+    last_seen_uid       INTEGER,
+    recent_email_ids    TEXT NOT NULL DEFAULT '[]',
+    last_idle_at        TEXT,
+    last_poll_at        TEXT,
+    consecutive_fails   INTEGER NOT NULL DEFAULT 0
+);
+
+-- ===========================================================================
+-- Embeddings (vector search)
+-- ===========================================================================
+-- On SQLite: we store vectors as BLOB (packed float32 array) and use the
+-- sqlite-vec extension for nearest-neighbour search.
+-- On Postgres: we use pgvector. The Postgres overlay reshapes the column.
+--
+-- The source_table column is the Drive's "namespace" (corpus_wiki,
+-- captured_items, corpus_raw, decisions). The retrieval lane re-ranker
+-- applies per-namespace weights after a WHERE source_table IN (...) query.
+CREATE TABLE IF NOT EXISTS embeddings (
+    embedding_id        INTEGER PRIMARY KEY AUTOINCREMENT,
+    tenant_id           TEXT NOT NULL REFERENCES tenants(tenant_id),
+    source_table        TEXT NOT NULL,           -- 'corpus_wiki' | 'captured_items' | 'corpus_raw' | 'decisions'
+    source_id           TEXT NOT NULL,
+    vector              BLOB NOT NULL,           -- packed float32 array (SQLite) or vector(384) (PG via overlay)
+    metadata            TEXT NOT NULL DEFAULT '{}',
+    created_at          TEXT NOT NULL DEFAULT (datetime('now')),
+    UNIQUE (tenant_id, source_table, source_id)
+);
+CREATE INDEX IF NOT EXISTS idx_emb_lookup ON embeddings(tenant_id, source_table, source_id);
+
+-- ===========================================================================
 -- Schema version marker
--- --------------------------------------------------------------------------
+-- ===========================================================================
 CREATE TABLE IF NOT EXISTS schema_meta (
     key                 TEXT PRIMARY KEY,
     value               TEXT NOT NULL
 );
-INSERT INTO schema_meta(key, value) VALUES ('version', '1')
-ON CONFLICT (key) DO NOTHING;
+INSERT OR IGNORE INTO schema_meta (key, value) VALUES ('version', '2');
+INSERT OR IGNORE INTO schema_meta (key, value) VALUES ('default_tenant_id', 'default');

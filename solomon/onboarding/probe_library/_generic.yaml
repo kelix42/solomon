@@ -1,0 +1,12 @@
+domain: _generic
+version: 0.1.0
+priority: 1   # last-resort fallbacks across all domains
+
+keywords: {}
+
+fallbacks:
+  - "Tell me about the last time that came up in your business."
+  - "What's the rule you've made for that, and when do you break it?"
+  - "Who's the last person you saw violate this rule? What did you do?"
+  - "If you had to write a one-line rule for a new hire, what would it say?"
+  - "When have you been wrong about this in the past?"

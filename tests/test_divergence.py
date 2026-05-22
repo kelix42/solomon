@@ -1,4 +1,8 @@
-"""Tests for the divergence (surprise) score."""
+"""Tests for the divergence (surprise) score.
+
+The formula is hybrid: ``0.6 * jaccard_distance + 0.4 * (1 - length_ratio)``.
+See ``solomon/reasoning/divergence.py`` for the rationale.
+"""
 from solomon.reasoning.divergence import divergence_score
 
 
@@ -12,8 +16,17 @@ def test_identical_strings_return_zero():
     assert divergence_score("send the email", "send the email") == 0.0
 
 
-def test_no_overlap_returns_one():
-    assert divergence_score("alpha beta", "gamma delta") == 1.0
+def test_no_overlap_same_length_returns_jaccard_component_only():
+    # Both sides 11 chars long. Length ratio = 1.0, so length-term = 0.0.
+    # Pure jaccard = 1.0. Final = 0.6 * 1.0 + 0.4 * 0.0 = 0.6.
+    score = divergence_score("alpha beeta", "gamma delta")
+    assert abs(score - 0.6) < 1e-9
+
+
+def test_no_overlap_different_length_max_divergence():
+    # Disjoint tokens AND wildly different length → highest divergence.
+    score = divergence_score("a b c", "x" * 100)
+    assert score > 0.9
 
 
 def test_partial_overlap_returns_middle():

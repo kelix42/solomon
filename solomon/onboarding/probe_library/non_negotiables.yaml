@@ -1,0 +1,138 @@
+# non_negotiables.yaml. Probe library for Onboarding Session 5 (Non-negotiables).
+# Stub at v0.1.0. Items captured here feed foundation/05-non-negotiables.yaml,
+# which is the deterministic hard-rule source for the decision pipeline Stage 4.
+
+domain: non_negotiables
+version: 0.1.0
+priority: 10
+
+probe_style: |
+  Solomon is a structured reflective listener. The technique borrows from
+  Rogerian listening and motivational interviewing, not from 1966 ELIZA's
+  canned response tables. The owner's exact phrasing is the raw material.
+  Solomon's job: make the owner feel heard enough to keep talking, while
+  quietly capturing rules and vocabulary.
+
+  Seven rules:
+
+  1. Use the owner's exact words. Verbatim phrasing must appear in most
+     follow-ups. The phrasing IS the data; paraphrasing destroys it. The
+     {phrase} substitution must produce sentences where the phrase reads
+     naturally, not bolted on.
+
+  2. Do not editorialize. Avoid "is real exposure", "is a real spread",
+     "tells me there's a number", "that's interesting". Reflect, do not
+     interpret. The owner's frame stands.
+
+  3. The follow-up must build on the echoed phrase. If the new question
+     is not about the echoed phrase, do not echo at all. Just ask the new
+     question. No fake bridges.
+
+  4. Drop filler. Do not start with "Got it", "Right", "OK", "Interesting",
+     "I see", or "That's a good point". Do not use "Tell me more" or
+     "Go on". When you need a connective, leave it out and start with
+     the echo.
+
+  5. Short is usually better. Echo plus one direct question. No setup,
+     no preface, no warm-up.
+
+  6. Follow emotional or evaluative content. When the owner says
+     something with feeling or judgment ("that would hurt", "I'm not
+     happy about it", "too much liability"), the next question is about
+     that, not a pivot away from it.
+
+  7. When pivoting to a new topic, just pivot. Do not invent a verbatim
+     phrase to echo just to soften the transition. Ask the new question
+     plainly. Required-field prompts in this file are pivots and are
+     written that way.
+
+  Continue prompts (use sparingly when the owner pauses on a thread that
+  is still producing captures): "Say more about that.", "Then what?",
+  "What happened next?".
+
+required_fields:
+  - id: hard_no_list
+    prompt: "What will you never do, no matter what?"
+    accepts: ["free_text", "i_dont_know", "not_applicable", "decline_to_answer"]
+    satisfied_when: "captured_items row exists with source_session=this AND keywords contains 'field:hard_no_list'"
+    follow_up_keywords: ["never", "won't", "refuse"]
+
+  - id: scope_of_rule
+    prompt: "For each of those, when does it apply? Always, or only in specific situations like pricing or hiring?"
+    accepts: ["free_text", "i_dont_know", "not_applicable", "decline_to_answer"]
+    satisfied_when: "captured_items row exists with source_session=this AND keywords contains 'field:scope_of_rule'"
+    follow_up_keywords: ["scope", "context"]
+
+  - id: deeper_reason
+    prompt: "Why is each one non-negotiable for you? What's the deeper reason?"
+    accepts: ["free_text", "i_dont_know", "not_applicable", "decline_to_answer"]
+    satisfied_when: "captured_items row exists with source_session=this AND keywords contains 'field:deeper_reason'"
+    follow_up_keywords: ["reason", "why"]
+
+  - id: violation_signal
+    prompt: "How would you know if Solomon was about to violate one? What's the keyword or pattern that signals it?"
+    accepts: ["free_text", "i_dont_know", "not_applicable", "decline_to_answer"]
+    satisfied_when: "captured_items row exists with source_session=this AND keywords contains 'field:violation_signal'"
+    follow_up_keywords: ["signal", "trigger", "pattern"]
+
+keywords:
+  never:
+    - priority: 1
+      template: "{phrase}. Has that always been a hard no, or did it become one?"
+    - priority: 2
+      template: "{phrase}. What's the story behind that becoming a never?"
+
+  "won't":
+    - priority: 1
+      template: "{phrase}. The last time you were tempted: what made you hold?"
+    - priority: 2
+      template: "{phrase}. Where would that rule break, if anywhere?"
+
+  illegal:
+    - priority: 1
+      template: "{phrase}. Where else might that show up that isn't obviously illegal?"
+    - priority: 2
+      template: "{phrase}. What's the borderline version you've seen others do?"
+
+  liability:
+    - priority: 1
+      template: "{phrase}. The last time liability was the deciding factor: what was it?"
+    - priority: 2
+      template: "{phrase}. Where would you accept that liability anyway?"
+
+  reputation:
+    - priority: 1
+      template: "{phrase}. Whose opinion is doing the work in that rule?"
+    - priority: 2
+      template: "{phrase}. Where has reputation already cost you a deal?"
+
+  trust:
+    - priority: 1
+      template: "{phrase}. The last time trust got burned: did the rule change?"
+    - priority: 2
+      template: "{phrase}. Who do you tell about a violation first?"
+
+  trigger:
+    - priority: 1
+      template: "{phrase}. If I saw that word in a message, what should I do?"
+    - priority: 2
+      template: "{phrase}. Are there variants of that signal I should also catch?"
+
+  scope:
+    - priority: 1
+      template: "{phrase}. Does that hold for sub-contracted work too?"
+    - priority: 2
+      template: "{phrase}. Where does scope end on that rule?"
+
+  reason:
+    - priority: 1
+      template: "{phrase}. Where did that conviction come from?"
+    - priority: 2
+      template: "{phrase}. Has that reason ever been tested?"
+
+fallbacks:
+  - "What's a deal you would walk away from even at 50% margin?"
+  - "What's the kind of customer you would refuse to work with?"
+  - "What's the kind of hire you would never make?"
+  - "What's the kind of vendor you would never pay?"
+  - "Tell me about the time you bent one of these rules and regretted it."

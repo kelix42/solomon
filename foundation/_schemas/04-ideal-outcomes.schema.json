@@ -1,0 +1,12 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://solomon.local/foundation/04-ideal-outcomes.schema.json",
+  "title": "04-ideal-outcomes",
+  "description": "Derived summary of captured_items rows for the '04-ideal-outcomes' onboarding session.",
+  "type": "object",
+  "additionalProperties": true,
+  "properties": {
+    "last_updated": { "type": ["string", "null"], "format": "date-time" },
+    "raw_notes": { "type": "string" }
+  }
+}

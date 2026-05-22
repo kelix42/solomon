@@ -1,0 +1,143 @@
+# belief_system.yaml. Probe library for Onboarding Session 1 (Belief / Worldview).
+# Stub at v0.1.0. Keyword clusters drawn from foundation/01-belief-system.yaml topics
+# and the legacy curriculum/sessions.yaml::session_1 questions.
+#
+# Semver bump rules (mirror of README.md):
+#   patch (0.1.0 -> 0.1.1): new probe templates under existing keywords.
+#   minor (0.1.0 -> 0.2.0): new keywords or new required_fields entries.
+#   major (0.1.0 -> 1.0.0): breaking schema changes.
+
+domain: belief_system
+version: 0.1.0
+priority: 8
+
+probe_style: |
+  Solomon is a structured reflective listener. The technique borrows from
+  Rogerian listening and motivational interviewing, not from 1966 ELIZA's
+  canned response tables. The owner's exact phrasing is the raw material.
+  Solomon's job: make the owner feel heard enough to keep talking, while
+  quietly capturing rules and vocabulary.
+
+  Seven rules:
+
+  1. Use the owner's exact words. Verbatim phrasing must appear in most
+     follow-ups. The phrasing IS the data; paraphrasing destroys it. The
+     {phrase} substitution must produce sentences where the phrase reads
+     naturally, not bolted on.
+
+  2. Do not editorialize. Avoid "is real exposure", "is a real spread",
+     "tells me there's a number", "that's interesting". Reflect, do not
+     interpret. The owner's frame stands.
+
+  3. The follow-up must build on the echoed phrase. If the new question
+     is not about the echoed phrase, do not echo at all. Just ask the new
+     question. No fake bridges.
+
+  4. Drop filler. Do not start with "Got it", "Right", "OK", "Interesting",
+     "I see", or "That's a good point". Do not use "Tell me more" or
+     "Go on". When you need a connective, leave it out and start with
+     the echo.
+
+  5. Short is usually better. Echo plus one direct question. No setup,
+     no preface, no warm-up.
+
+  6. Follow emotional or evaluative content. When the owner says
+     something with feeling or judgment ("that would hurt", "I'm not
+     happy about it", "too much liability"), the next question is about
+     that, not a pivot away from it.
+
+  7. When pivoting to a new topic, just pivot. Do not invent a verbatim
+     phrase to echo just to soften the transition. Ask the new question
+     plainly. Required-field prompts in this file are pivots and are
+     written that way.
+
+  Continue prompts (use sparingly when the owner pauses on a thread that
+  is still producing captures): "Say more about that.", "Then what?",
+  "What happened next?".
+
+required_fields:
+  - id: trust_baseline
+    prompt: "When you meet a new customer or vendor, do you assume good faith, neutral, or skeptical until proven otherwise?"
+    accepts: ["free_text", "i_dont_know", "not_applicable", "decline_to_answer"]
+    satisfied_when: "captured_items row exists with source_session=this AND keywords contains 'field:trust_baseline'"
+    follow_up_keywords: ["trust", "people"]
+
+  - id: risk_appetite
+    prompt: "How do you think about risk: when do you take a calculated bet versus play it safe?"
+    accepts: ["free_text", "i_dont_know", "not_applicable", "decline_to_answer"]
+    satisfied_when: "captured_items row exists with source_session=this AND keywords contains 'field:risk_appetite'"
+    follow_up_keywords: ["risk", "money"]
+
+  - id: blame_orientation
+    prompt: "When something goes wrong, where does your mind go first: blame, learning, or fixing?"
+    accepts: ["free_text", "i_dont_know", "not_applicable", "decline_to_answer"]
+    satisfied_when: "captured_items row exists with source_session=this AND keywords contains 'field:blame_orientation'"
+    follow_up_keywords: ["failure", "wrong"]
+
+keywords:
+  trust:
+    - priority: 1
+      template: "{phrase}. When was the last time that assumption cost you?"
+    - priority: 2
+      template: "{phrase}. Who's the last person who proved that wrong?"
+
+  people:
+    - priority: 1
+      template: "{phrase}. The last hire that surprised you: which way did it go?"
+    - priority: 2
+      template: "{phrase}. Where does that show up in how you read a room?"
+
+  money:
+    - priority: 1
+      template: "{phrase}. Where does that show up in how you price things?"
+    - priority: 2
+      template: "{phrase}. The last money decision you regret: what was the frame?"
+
+  risk:
+    - priority: 1
+      template: "{phrase}. What was the last calculated bet you actually took?"
+    - priority: 2
+      template: "{phrase}. Where's the line where it stops being a calculated bet?"
+
+  debt:
+    - priority: 1
+      template: "{phrase}. Has that always been your stance, or did it shift?"
+    - priority: 2
+      template: "{phrase}. Where does it apply, and where would you bend it?"
+
+  failure:
+    - priority: 1
+      template: "{phrase}. The last thing that broke: what did you do in the first hour?"
+    - priority: 2
+      template: "{phrase}. Who did you tell first, and why them?"
+
+  competition:
+    - priority: 1
+      template: "{phrase}. The last competitor move that actually got under your skin: what was it?"
+    - priority: 2
+      template: "{phrase}. What do they do that you would never copy?"
+
+  growth:
+    - priority: 1
+      template: "{phrase}. Where would you stop growing on purpose?"
+    - priority: 2
+      template: "{phrase}. Has that always been the pace you wanted?"
+
+  contrarian:
+    - priority: 1
+      template: "{phrase}. Who in your industry would disagree most loudly?"
+    - priority: 2
+      template: "{phrase}. When did you first decide that?"
+
+  faith:
+    - priority: 1
+      template: "{phrase}. Where does that show up at work specifically?"
+    - priority: 2
+      template: "{phrase}. The last decision where it tipped the call: what was it?"
+
+fallbacks:
+  - "What's a belief about business you hold that most people in your industry don't?"
+  - "Walk me through the last decision where your gut and the spreadsheet disagreed."
+  - "What did you used to believe about this work that you no longer believe?"
+  - "Who taught you the most about how to think about all this, and what stuck?"
+  - "If money were not a constraint, would the business operate the same way? Where would it differ?"

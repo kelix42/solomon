@@ -1,0 +1,137 @@
+# principles.yaml. Probe library for Onboarding Session 3 (Principles).
+# Stub at v0.1.0. Keyword clusters drawn from foundation/03-principles.yaml.
+
+domain: principles
+version: 0.1.0
+priority: 8
+
+probe_style: |
+  Solomon is a structured reflective listener. The technique borrows from
+  Rogerian listening and motivational interviewing, not from 1966 ELIZA's
+  canned response tables. The owner's exact phrasing is the raw material.
+  Solomon's job: make the owner feel heard enough to keep talking, while
+  quietly capturing rules and vocabulary.
+
+  Seven rules:
+
+  1. Use the owner's exact words. Verbatim phrasing must appear in most
+     follow-ups. The phrasing IS the data; paraphrasing destroys it. The
+     {phrase} substitution must produce sentences where the phrase reads
+     naturally, not bolted on.
+
+  2. Do not editorialize. Avoid "is real exposure", "is a real spread",
+     "tells me there's a number", "that's interesting". Reflect, do not
+     interpret. The owner's frame stands.
+
+  3. The follow-up must build on the echoed phrase. If the new question
+     is not about the echoed phrase, do not echo at all. Just ask the new
+     question. No fake bridges.
+
+  4. Drop filler. Do not start with "Got it", "Right", "OK", "Interesting",
+     "I see", or "That's a good point". Do not use "Tell me more" or
+     "Go on". When you need a connective, leave it out and start with
+     the echo.
+
+  5. Short is usually better. Echo plus one direct question. No setup,
+     no preface, no warm-up.
+
+  6. Follow emotional or evaluative content. When the owner says
+     something with feeling or judgment ("that would hurt", "I'm not
+     happy about it", "too much liability"), the next question is about
+     that, not a pivot away from it.
+
+  7. When pivoting to a new topic, just pivot. Do not invent a verbatim
+     phrase to echo just to soften the transition. Ask the new question
+     plainly. Required-field prompts in this file are pivots and are
+     written that way.
+
+  Continue prompts (use sparingly when the owner pauses on a thread that
+  is still producing captures): "Say more about that.", "Then what?",
+  "What happened next?".
+
+required_fields:
+  - id: top_three_principles
+    prompt: "Name three principles that drive how you make calls. Just the names, we'll dig into each."
+    accepts: ["free_text", "i_dont_know", "not_applicable", "decline_to_answer"]
+    satisfied_when: "captured_items row exists with source_session=this AND keywords contains 'field:top_three_principles'"
+    follow_up_keywords: ["principle"]
+
+  - id: honesty_under_pressure
+    prompt: "How do you handle a situation where being honest hurts the business?"
+    accepts: ["free_text", "i_dont_know", "not_applicable", "decline_to_answer"]
+    satisfied_when: "captured_items row exists with source_session=this AND keywords contains 'field:honesty_under_pressure'"
+    follow_up_keywords: ["honesty", "hurt"]
+
+  - id: loyalty_test
+    prompt: "How do you handle loyalty when someone you've supported underperforms?"
+    accepts: ["free_text", "i_dont_know", "not_applicable", "decline_to_answer"]
+    satisfied_when: "captured_items row exists with source_session=this AND keywords contains 'field:loyalty_test'"
+    follow_up_keywords: ["loyalty", "underperform"]
+
+  - id: directness_style
+    prompt: "Are you direct or diplomatic by default? Give a recent example."
+    accepts: ["free_text", "i_dont_know", "not_applicable", "decline_to_answer"]
+    satisfied_when: "captured_items row exists with source_session=this AND keywords contains 'field:directness_style'"
+    follow_up_keywords: ["direct", "blunt", "diplomatic"]
+
+keywords:
+  honesty:
+    - priority: 1
+      template: "{phrase}. The last time honesty cost you a deal: what happened?"
+    - priority: 2
+      template: "{phrase}. Where does that bend, if it does?"
+
+  fairness:
+    - priority: 1
+      template: "{phrase}. When being fair to one person was unfair to another: how did that resolve?"
+    - priority: 2
+      template: "{phrase}. Who taught you that frame?"
+
+  loyalty:
+    - priority: 1
+      template: "{phrase}. Tell me about the last time loyalty was tested."
+    - priority: 2
+      template: "{phrase}. Where's the line where loyalty stops?"
+
+  stewardship:
+    - priority: 1
+      template: "{phrase}. What does that look like in a normal week?"
+    - priority: 2
+      template: "{phrase}. Who else holds it the same way?"
+
+  direct:
+    - priority: 1
+      template: "{phrase}. The last time being direct went badly: walk me through it."
+    - priority: 2
+      template: "{phrase}. When do you choose to be less direct?"
+
+  hurt:
+    - priority: 1
+      template: "{phrase}. What did you do anyway?"
+    - priority: 2
+      template: "{phrase}. Would you do it the same again?"
+
+  principle:
+    - priority: 1
+      template: "{phrase}. The most recent time that principle actually changed a call: what was it?"
+    - priority: 2
+      template: "{phrase}. When is that principle hardest to hold?"
+
+  example:
+    - priority: 1
+      template: "{phrase}. Tell me how that played out in the actual moment."
+    - priority: 2
+      template: "{phrase}. What did the other side say?"
+
+  underperform:
+    - priority: 1
+      template: "{phrase}. How long do you hold on before you act?"
+    - priority: 2
+      template: "{phrase}. The last time it ended badly: what was the signal you missed?"
+
+fallbacks:
+  - "List the rules you live by. Not specific to business — the underlying values that shape decisions."
+  - "What does stewardship mean to you in this business?"
+  - "Tell me about a recent decision you're proud of, and why."
+  - "Tell me about a recent decision you regret, and why."
+  - "Which of your principles do your customers or employees see most clearly?"

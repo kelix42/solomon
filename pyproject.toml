@@ -26,6 +26,11 @@ dependencies = [
     "httpx>=0.27",
     # Git for foundation file versioning
     "GitPython>=3.1",
+    # JSON-logic for Stage 4 hard-rule non-negotiables (Python-3 maintained fork).
+    # Imports as `json_logic`; canonical Drive reference uses the same import.
+    "json-logic-qubit>=0.9",
+    # ULID for events.event_id
+    "ulid-py>=1.1",
 ]
 
 [project.optional-dependencies]
