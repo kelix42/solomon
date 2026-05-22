@@ -35,6 +35,10 @@ JOB_ORDER: Tuple[Tuple[str, str], ...] = (
     ("working_memory",     "solomon.sleep.job_6_working_memory:run"),
     ("autonomy",           "solomon.sleep.job_7_autonomy:run"),
     ("mentoring_scheduler","solomon.sleep.job_8_mentoring_scheduler:run"),
+    ("corpus_lint",        "solomon.sleep.job_9_corpus_lint:run"),
+    ("corpus_backup",      "solomon.sleep.job_10_corpus_backup:run"),
+    ("embed_pending",      "solomon.sleep.job_11_embed_pending:run"),
+    ("yaml_reconcile",     "solomon.sleep.job_12_yaml_reconcile:run"),
 )
 
 
