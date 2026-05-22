@@ -2,9 +2,9 @@
 
 **A personal chief of staff that learns how you make decisions, then slowly starts making them for you.**
 
-Solomon watches the choices you make in your business: over emails, meetings, contracts, voice notes. It builds up a picture of how you think. At first it just observes. Once it has enough evidence, it starts drafting replies the way you'd write them and flagging things you'd want to know about. After that, it starts handling things on its own: scheduling, replying, approving small expenses, declining the wrong-fit requests, escalating only what genuinely needs you.
+Solomon watches the choices you make in your business — over emails, meetings, contracts, voice notes. It writes down the rules you actually live by, including the ones you've never said out loud. At first it just observes. Once it has enough evidence, it starts drafting replies the way you'd write them and flagging things you'd want to know about. After that, it starts handling things on its own: scheduling, replying, approving small expenses, declining the wrong-fit requests, escalating only what genuinely needs you.
 
-You don't have to keep granting permissions one at a time. Solomon raises its own ceiling as its track record warrants, and drops back down on its own when it overreaches. The goal is a business that keeps running whether you're at your desk or not, so you can spend less time being the operator and more time being the owner.
+You don't have to keep granting permissions one at a time. Solomon promotes itself when it gets things right, and demotes itself when it doesn't. A business that keeps running whether you're at your desk or not. Less time being the operator, more time being the owner.
 
 It's a plugin for [Hermes Agent](https://github.com/NousResearch/hermes-agent). If you already use Hermes, Solomon turns it into something focused on one specific person and one specific business: yours.
 
