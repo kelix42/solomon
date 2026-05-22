@@ -27,6 +27,13 @@ Public API:
 """
 from __future__ import annotations
 
-from .runner import run
-
-__all__ = ["run"]
+# Lazy / resilient import — ``runner`` is the last module to land in
+# Session A. Older sessions (and the non_negotiables shim, which goes
+# through ``solomon.pipeline.stage_hard_rule``) shouldn't crash if
+# ``runner.py`` is incomplete. Same pattern as solomon/corpus/__init__.py
+# uses for ``ingest``.
+try:  # pragma: no cover - exercised by import-time guards
+    from .runner import run  # noqa: F401
+    __all__ = ["run"]
+except ImportError:
+    __all__ = []
