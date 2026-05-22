@@ -27,5 +27,11 @@ NAMESPACE_WEIGHTS: Dict[str, float] = {
     "decisions": 0.10,        # historical decision log
 }
 
-# Re-exports for convenience.
-from .ingest import ingest_file, ingest_directory  # noqa: E402,F401
+# Re-exports for convenience. Wrapped in try/except so the package
+# imports cleanly even when individual submodules are still being
+# brought up (the corpus pipeline is built one file at a time per
+# BUILD-STATE.md).
+try:
+    from .ingest import ingest_file, ingest_directory  # noqa: E402,F401
+except ImportError:  # pragma: no cover — only during incremental build
+    pass
