@@ -1,4 +1,4 @@
-# Solomon — Build State Snapshot (2026-05-22 evening)
+# Solomon — Build State Snapshot (2026-05-23 morning)
 
 This file is the source of truth for "what state is the build in right now" so we don't lose context between sessions. Update at the end of every working session.
 
@@ -10,7 +10,7 @@ This file is the source of truth for "what state is the build in right now" so w
 
 **Embeddings:** local `sentence-transformers/all-MiniLM-L6-v2` by default (384-dim, free, no API calls). OpenAI `text-embedding-3-small` opt-in.
 
-**Multimodal fallback** (scanned PDFs / images during corpus ingestion): the LONE remote dependency, documented as such in the corpus README. Everything else local.
+**Multimodal fallback** (scanned PDFs / images during corpus ingestion): the LONE remote dependency, documented as such in the corpus README. Stubbed behind `SOLOMON_ALLOW_VISION_API`; raises `UnsupportedFileType` until wired. Everything else local.
 
 ## What's done — tested, working, committed
 
@@ -24,25 +24,23 @@ This file is the source of truth for "what state is the build in right now" so w
 - ✅ **Sensitivity filter upgraded** to spaCy NER + regex + allowlist (graceful fallback to regex-only when spaCy isn't installed). 6/6 existing tests still pass.
 - ✅ **Divergence formula** upgraded to `0.6·jaccard + 0.4·(1 − length_ratio)`. 5 tests pass.
 - ✅ **Interview engine — DONE.** Session runner rewritten to the 5-stage flow (Setup → Discovery → Required-fields → Closing checkpoint → Foundation YAML render). All 7 probe libraries wired in. Stage D intent classifier (confirm/correct/add/keep_talking/abandon) with deterministic short-circuits for the common words. Resume-on-Ctrl-C works because the `sessions` row stays `open` until Stage E succeeds. 19 new interview/coverage tests + 3 session-runner integration tests with stubbed LLM and scripted stdin.
-- ✅ **Tests: 66/66 passing** (was 36; +30 new for the interview).
+- ✅ **Corpus pipeline — DONE (2026-05-23).** All of items 1–13 from this session's build plan are green:
+  - `solomon/corpus/extract.py` — per-format dispatch over pypdf/python-docx/python-pptx/openpyxl/beautifulsoup4 + stdlib email + csv + json + multimodal-vision stub. ExtractedDoc dataclass with text, page_breaks, metadata. (19 tests)
+  - `solomon/corpus/manifest.py` — SHA256-keyed ingested_files manifest via the pool API. Idempotent on SHA; list_by_status() + stats() helpers. (12 tests)
+  - `solomon/corpus/chunk.py` — type-aware delegation to `solomon.ingestion.chunker` + Drive-style sliding-window fallback. Chunk dataclass with char_offsets + source_section. (9 tests)
+  - `solomon/corpus/embed.py` — wrapper over `solomon.ingestion.embedder.embed_batch` with the `source_table` discriminator (`corpus_raw` / `corpus_wiki` / `captured_items` / `decisions`). Float32-packed BLOB on SQLite. (12 tests)
+  - `solomon/corpus/prompts.py` + `llm.py` + `llm_passes.py` — Karpathy two-pass. Pass 1 returns the JSON envelope; Pass 2 merges per-page markdown and triggers the section-hash upsert. (17 tests)
+  - `solomon/corpus/wiki.py` — section-hash diff over the embeddings table. Idempotent re-writes; orphan-vector cleanup; `remove_page()` for forget cascade. (16 tests)
+  - `solomon/corpus/rules.py` — THE CRITICAL FILE. Pass 1's proposed_rules become `proposed_rules` rows + paired `mentoring_queue` rows (source='corpus_rule_proposal', priority=4). Dedup on (tenant_id, source_path, verbatim_excerpt). delete_for_source() for forget cascade. (16 tests)
+  - `solomon/corpus/lint.py` — health checks: orphan raw embeddings, broken wiki pages, orphan wiki embeddings, forgotten files with lingering rows, orphan queued proposed_rules. LintFinding dataclass + summary(). (11 tests)
+  - `solomon/corpus/forget.py` — owner-initiated deletion cascade: file → embeddings → proposed_rules → mentoring_queue → mark forgotten. (7 tests)
+  - `solomon/corpus/ingest.py` — orchestrator. Full walk through extract → dedup → route → chunk → embed → Pass 1/2 → rules → mark success. Failure modes mark 'partial' / 'failed' cleanly. (7 tests)
+  - `solomon/workers/corpus_inbox_watcher/` — watchdog-based inbox watcher with 30s debounce, 3s file-stable check, catch-up scan, polling fallback. (17 tests)
+  - `solomon/workers/plaud_ingest/` — STUB. Persistent state + config + save_attachment all tested; main() refuses to start without IMAP creds + warns the listener thread is deferred. (11 tests)
+  - `solomon corpus ingest|watch|stats|forget|lint` CLI subcommands wired in `solomon/cli.py`. (9 tests)
+- ✅ **Tests: 229/229 passing** (was 66; +163 net new from this session, all corpus).
 
 ## What's partially built — files exist but need wiring + verification
-
-**Corpus pipeline** (Subagent 2 got the scaffolding done):
-- ✅ Directory structure: `corpus/{inbox,raw,wiki}/<category>/` with `.gitkeep`
-- ✅ `corpus/schema.md` (owner-editable config) + `corpus/README.md`
-- ✅ `solomon/corpus/__init__.py` (with NAMESPACE_WEIGHTS constant)
-- ✅ `solomon/corpus/schema_config.py`, `route.py`
-- ❌ `extract.py` (hybrid file-type extraction — pypdf/docx/pptx/xlsx/html/eml/csv/json + Sonnet multimodal fallback)
-- ❌ `chunk.py` (delegate to our type-aware chunker + Drive's sliding-window fallback)
-- ❌ `embed.py` (wrapper around `ingestion/embedder.py` adding source_table)
-- ❌ `llm.py`, `llm_passes.py`, `prompts.py` (Karpathy two-pass pattern)
-- ❌ `wiki.py` (section-hash diff, swap Pinecone for embeddings table)
-- ❌ `rules.py` (proposed_rules → mentoring_queue mining)
-- ❌ `manifest.py` (SHA256 dedup via ingested_files)
-- ❌ `lint.py`, `forget.py`, `ingest.py` (orchestrator)
-- ❌ `solomon/workers/corpus_inbox_watcher/` (watchdog inbox watcher)
-- ❌ `solomon/workers/plaud_ingest/` (IMAP IDLE for Plaud voice recordings)
 
 **Decision pipeline** (Subagent 3 got 5 of 10 stages done):
 - ✅ `solomon/pipeline/__init__.py`, `_helpers.py` (get_event, update_event, stage_timer)
@@ -56,39 +54,65 @@ This file is the source of truth for "what state is the build in right now" so w
 - ❌ 4 new sleep jobs: `job_9_corpus_lint.py`, `job_10_corpus_backup.py`, `job_11_embed_pending.py`, `job_12_yaml_reconcile.py`
 - ❌ Append new jobs to `solomon/sleep/runner.py::JOB_ORDER`
 
-**CLI + Install** (deferred until subsystems are done):
-- ❌ `solomon corpus watch / ingest / stats` CLI subcommands
-- ❌ Rewrite `install.sh` to walk the user end-to-end: install Hermes if missing → pip install solomon-brain → `solomon init` → onboarding session 0 → session 1 → … → session 6 → ingestion prompt → review queue → "you're in observe-only mode now"
-- ❌ Add to `pyproject.toml`: `ulid-py>=1.1`, `spacy>=3.7`, `pypdf>=4.0`, `python-docx>=1.1`, `python-pptx>=0.6`, `openpyxl>=3.1`, `beautifulsoup4>=4.12`, `watchdog>=4.0`, `imapclient>=3.0`, `json-logic-qubit>=0.9`. Optional extras: `[redaction-spacy]`, `[local-embeddings]`.
+**Review CLI + Install** (deferred to next session):
+- ❌ `solomon/mentoring/review.py` + `solomon mentoring review` CLI subcommand. Reads mentoring_queue ORDER BY priority, status='queued'. Owner picks approve / reject / edit. Approve = INSERT into heuristics, mark queue row resolved.
+- ❌ Rewrite `install.sh` to walk the user end-to-end: install Hermes if missing → pip install solomon-brain → `solomon init` → onboarding session 0 → … → session 6 → corpus ingest prompt → review queue → "you're in observe-only mode now"
 
 ## Recommended next-session priority order
 
-1. **Finish the pipeline** (stages 6–10, runner.py, non_negotiables shim, conductor wire-up, autonomy L0–L4). The brain's live loop. This is the biggest remaining chunk.
-2. **Finish the corpus** (extract → chunk → embed → llm_passes → wiki → rules → ingest, then the two workers). Required for onboarding to be complete per the design.
-3. **4 new sleep jobs.**
-4. **Rewrite install.sh** to walk the user through the full onboarding flow on first install. Now that the interview actually works, this is the user-facing payoff.
-5. **Push to GitHub.**
+1. **Review CLI + install.sh** (items 14 + 15 from this session's build plan). Now that the corpus pipeline + mentoring_queue exists, the review CLI closes the loop end-to-end. ~200 lines.
+2. **Finish the decision pipeline** (stages 6–10, runner.py, non_negotiables shim, conductor wire-up, autonomy L0–L4). The brain's live loop.
+3. **4 new sleep jobs** — `job_9_corpus_lint` would call `solomon.corpus.lint.run_lint()` (already implemented); the rest are smaller.
+4. **Push to GitHub.**
 
 ## Pinned reading order for next session
 
 Before writing any code, re-read:
 1. `BUILD-STATE.md` (this file)
-2. `docs/REPORT-INTERVIEW.md` section 4 (the integration plan)
-3. `docs/REPORT-PIPELINE.md` section 4
-4. `docs/REPORT-CORPUS.md` section 4
-5. `references/eliza-listening.md` (the seven mirroring rules — pin to every interview-phase LLM call)
+2. `docs/REPORT-PIPELINE.md` section 4 (the integration plan)
+3. `references/eliza-listening.md` (the seven mirroring rules — pin to every interview-phase LLM call)
 
-## Files modified or added in the last session
+## Files modified or added in the last session (2026-05-23 corpus pipeline)
 
 ```
-M solomon/onboarding/session_runner.py    # rewrite: 5-stage flow over the engine
-M pyproject.toml                          # add interview-vocab optional (spacy)
-M BUILD-STATE.md                          # this file
++ solomon/corpus/extract.py
++ solomon/corpus/manifest.py
++ solomon/corpus/chunk.py
++ solomon/corpus/embed.py
++ solomon/corpus/prompts.py
++ solomon/corpus/llm.py
++ solomon/corpus/llm_passes.py
++ solomon/corpus/wiki.py
++ solomon/corpus/rules.py             # THE CRITICAL FILE
++ solomon/corpus/lint.py
++ solomon/corpus/forget.py
++ solomon/corpus/ingest.py
++ solomon/workers/__init__.py
++ solomon/workers/corpus_inbox_watcher/__init__.py
++ solomon/workers/corpus_inbox_watcher/__main__.py
++ solomon/workers/plaud_ingest/__init__.py
++ solomon/workers/plaud_ingest/__main__.py
 
-+ tests/conftest.py                       # solomon_db fixture (per-test SQLite)
-+ tests/test_interview_engine.py          # 11 tests for engine.select_next_probe
-+ tests/test_coverage.py                  # 16 tests for coverage.* helpers
-+ tests/test_session_runner.py            # 3 end-to-end tests with stubbed LLM
++ tests/test_corpus_extract.py
++ tests/test_corpus_manifest.py
++ tests/test_corpus_chunk.py
++ tests/test_corpus_embed.py
++ tests/test_corpus_llm_passes.py
++ tests/test_corpus_wiki.py
++ tests/test_corpus_rules.py
++ tests/test_corpus_lint.py
++ tests/test_corpus_forget.py
++ tests/test_corpus_ingest.py
++ tests/test_corpus_inbox_watcher.py
++ tests/test_plaud_ingest.py
++ tests/test_corpus_cli.py
+
+M solomon/corpus/__init__.py          # tolerate incremental builds
+M solomon/cli.py                      # add `solomon corpus ...` subcommands
+M pyproject.toml                      # add pypdf/python-docx/python-pptx/
+                                       # openpyxl/beautifulsoup4/watchdog/
+                                       # imapclient as required deps
+M BUILD-STATE.md                      # this file
 ```
 
-**Tests:** 66/66 passing on SQLite. Run `pytest tests/ -v` to verify.
+**Tests:** 229/229 passing on SQLite. Run `pytest tests/ -v` to verify.

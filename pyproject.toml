@@ -31,6 +31,15 @@ dependencies = [
     "json-logic-qubit>=0.9",
     # ULID for events.event_id
     "ulid-py>=1.1",
+    # Corpus pipeline — file-type extractors (required, not optional).
+    "pypdf>=4.0",
+    "python-docx>=1.1",
+    "python-pptx>=0.6",
+    "openpyxl>=3.1",
+    "beautifulsoup4>=4.12",
+    # Corpus inbox watcher + Plaud IMAP listener.
+    "watchdog>=4.0",
+    "imapclient>=3.0",
 ]
 
 [project.optional-dependencies]

@@ -6,6 +6,11 @@ Exposes:
   solomon ingest PATH [PATH...] — ingest one or more historical documents
   solomon ingestion review     — review extracted decisions and proposed heuristics
   solomon ingestion list       — list ingestion jobs
+  solomon corpus ingest PATH   — run the corpus pipeline on one or more files
+  solomon corpus watch         — start the inbox watcher (long-lived)
+  solomon corpus stats         — print manifest + embeddings counts
+  solomon corpus forget        — owner-initiated deletion cascade
+  solomon corpus lint          — health checks
   solomon doctor               — health check
   solomon sleep                — run the nightly cycle on demand
   solomon uninstall            — restore pre-Solomon Hermes config
@@ -115,6 +120,142 @@ def cmd_init() -> int:
         style="green",
     )
     return 0
+
+
+def cmd_corpus(args: List[str]) -> int:
+    """Corpus pipeline subcommands.
+
+    Usage:
+        solomon corpus ingest <path> [<path>...]
+        solomon corpus watch                 — start the inbox watcher (blocking)
+        solomon corpus stats                 — manifest + embeddings counters
+        solomon corpus forget --sha SHA      — owner-forget cascade
+        solomon corpus forget --path REL     — owner-forget cascade by raw_path
+        solomon corpus lint                  — run all health checks
+    """
+    if not args:
+        _print(
+            "Usage: solomon corpus <ingest|watch|stats|forget|lint> ...",
+            style="yellow",
+        )
+        return 1
+    sub, rest = args[0], args[1:]
+    if sub == "ingest":
+        return _corpus_ingest(rest)
+    if sub == "watch":
+        return _corpus_watch()
+    if sub == "stats":
+        return _corpus_stats()
+    if sub == "forget":
+        return _corpus_forget(rest)
+    if sub == "lint":
+        return _corpus_lint()
+    _print(f"Unknown subcommand: corpus {sub}", style="red")
+    return 1
+
+
+def _corpus_ingest(paths: List[str]) -> int:
+    if not paths:
+        _print("Usage: solomon corpus ingest <path> [<path>...]", style="yellow")
+        return 1
+    from .corpus.ingest import ingest_directory, ingest_file
+    summary = {"success": 0, "partial": 0, "failed": 0, "skipped": 0, "parked": 0}
+    total_vectors = 0
+    total_rules = 0
+    total_wiki = 0
+    for raw in paths:
+        p = Path(os.path.expanduser(raw))
+        if p.is_dir():
+            results = ingest_directory(p)
+        else:
+            results = [ingest_file(p)]
+        for r in results:
+            summary[r.status] = summary.get(r.status, 0) + 1
+            total_vectors += r.vector_count
+            total_rules += r.rules_written
+            total_wiki += len(r.wiki_pages)
+            label = f"  [{r.status}]"
+            details = f"{p.name if not p.is_dir() else (r.raw_path or '?')}"
+            if r.reason:
+                details += f" ({r.reason})"
+            _print(f"{label} {details}")
+    _print(
+        f"\n[green]Done.[/] success={summary['success']} "
+        f"partial={summary['partial']} skipped={summary['skipped']} "
+        f"parked={summary['parked']} failed={summary['failed']} "
+        f"| {total_vectors} embeddings, {total_wiki} wiki pages, "
+        f"{total_rules} proposed rules"
+    )
+    if summary.get("failed", 0) or summary.get("partial", 0):
+        _print(
+            "\nReview the proposed rules with: [cyan]solomon mentoring review[/]",
+            style="yellow",
+        )
+    return 0
+
+
+def _corpus_watch() -> int:
+    from .workers.corpus_inbox_watcher import main as watcher_main
+    _print("[cyan]Starting corpus inbox watcher (Ctrl-C to stop)...[/]")
+    return int(watcher_main() or 0)
+
+
+def _corpus_stats() -> int:
+    from .corpus import manifest as cm
+    from .corpus import embed as ce
+    from .corpus import rules as cr
+    stats = cm.stats()
+    _print("[bold cyan]Corpus stats[/]")
+    _print(f"  files: total={stats.get('total', 0)}  success={stats.get('success', 0)}  "
+           f"pending={stats.get('pending', 0)}  partial={stats.get('partial', 0)}  "
+           f"failed={stats.get('failed', 0)}  forgotten={stats.get('forgotten', 0)}")
+    _print(f"  embeddings: corpus_raw={ce.count_for_source_table(ce.SOURCE_TABLE_CORPUS_RAW)}  "
+           f"corpus_wiki={ce.count_for_source_table(ce.SOURCE_TABLE_CORPUS_WIKI)}")
+    _print(f"  proposed_rules queued: {len(cr.list_queued())}")
+    return 0
+
+
+def _corpus_forget(args: List[str]) -> int:
+    sha = None
+    raw_path = None
+    file_id = None
+    i = 0
+    while i < len(args):
+        a = args[i]
+        if a == "--sha" and i + 1 < len(args):
+            sha = args[i + 1]; i += 2; continue
+        if a == "--path" and i + 1 < len(args):
+            raw_path = args[i + 1]; i += 2; continue
+        if a == "--id" and i + 1 < len(args):
+            file_id = args[i + 1]; i += 2; continue
+        i += 1
+    if not (sha or raw_path or file_id):
+        _print("Usage: solomon corpus forget --sha SHA | --path REL | --id FILE_ID",
+               style="yellow")
+        return 1
+    from .corpus.forget import forget_file
+    s = forget_file(sha256=sha, raw_path=raw_path, file_id=file_id)
+    if not s["found"]:
+        _print("File not found in ingested_files.", style="yellow")
+        return 1
+    _print(
+        f"[green]Forgotten.[/] file_id={s['file_id']} raw_path={s['raw_path']} "
+        f"embeddings_deleted={s['embeddings_deleted']} rules_deleted={s['rules_deleted']} "
+        f"disk_deleted={s['disk_deleted']}"
+    )
+    return 0
+
+
+def _corpus_lint() -> int:
+    from .corpus.lint import run_lint, summary
+    findings = run_lint()
+    summ = summary(findings)
+    _print(f"[bold cyan]Corpus lint[/]: {summ.get('total', 0)} findings "
+           f"({summ.get('errors', 0)} errors, {summ.get('warnings', 0)} warnings)")
+    for f in findings:
+        prefix = "[red]ERROR[/]" if f.severity == "error" else "[yellow]WARN[/]"
+        _print(f"  {prefix} {f.code}: {f.detail}")
+    return 1 if summ.get("errors", 0) else 0
 
 
 def cmd_ingest(args: List[str]) -> int:
@@ -410,6 +551,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         "onboard": lambda: cmd_onboard(rest),
         "ingest": lambda: cmd_ingest(rest),
         "ingestion": lambda: cmd_ingestion(rest),
+        "corpus": lambda: cmd_corpus(rest),
         "sleep": lambda: cmd_sleep(),
         "uninstall": lambda: cmd_uninstall(),
     }.get(cmd, lambda: (_print(f"Unknown command: {cmd}", style="red") or 1))()  # type: ignore[func-returns-value]
