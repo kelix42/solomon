@@ -1,10 +1,12 @@
 # Solomon
 
-**A personal chief of staff that learns how you make decisions, then slowly starts making them with you.**
+**A personal chief of staff that learns how you make decisions, then slowly starts making them for you.**
 
-Solomon watches the choices you make in your business — over emails, meetings, contracts, voice notes — and builds up a picture of how you think. Once it knows you well enough, it starts to help: drafting replies the way you'd write them, flagging things you'd want to know about, eventually handling small decisions on its own when you give it permission.
+Solomon watches the choices you make in your business: over emails, meetings, contracts, voice notes. It builds up a picture of how you think. At first it just observes. Once it has enough evidence, it starts drafting replies the way you'd write them and flagging things you'd want to know about. After that, it starts handling things on its own: scheduling, replying, approving small expenses, declining the wrong-fit requests, escalating only what genuinely needs you.
 
-It's a plugin for [Hermes Agent](https://github.com/NousResearch/hermes-agent). If you already use Hermes, Solomon turns it into something focused on one specific person and one specific business — yours.
+You don't have to keep granting permissions one at a time. Solomon raises its own ceiling as its track record warrants, and drops back down on its own when it overreaches. The goal is a business that keeps running whether you're at your desk or not, so you can spend less time being the operator and more time being the owner.
+
+It's a plugin for [Hermes Agent](https://github.com/NousResearch/hermes-agent). If you already use Hermes, Solomon turns it into something focused on one specific person and one specific business: yours.
 
 ## Who this is for
 
@@ -24,13 +26,13 @@ Solomon has three jobs.
 
    It compares the two. The gap between them tells it how confident to be. Then a third pass (the "audit gate") checks the answer against your non-negotiables before anything leaves the system.
 
-**3. It earns trust gradually.** Every scope of decision (replying to a customer, scheduling a meeting, approving a small expense) has four levels:
+**3. It earns its own trust, gradually.** Every kind of decision (replying to a customer, scheduling a meeting, approving a small expense) has four levels:
    - **Watch** — Solomon just observes
    - **Suggest** — Solomon tells you what it would do
    - **Act with approval** — Solomon drafts the action; you click yes
    - **Act alone** — Solomon does it without asking
 
-   Scopes start at "watch" and only move up after a track record. Override Solomon and the scope drops back down. Time alone never raises trust; only evidence does.
+   Scopes start at "watch." Solomon moves them up on its own as it builds a track record, and drops them back down on its own when it gets something wrong. You don't have to manually promote each scope. You can override whenever you want, but most of the trust-ladder movement happens without you in the loop. Time alone never raises trust; only evidence does.
 
 While you sleep, twelve background jobs run: comparing predictions against what actually happened, archiving rules that haven't been used, looking for contradictions in your principles, backing up your data, and queuing things for you to review next time you check in.
 
