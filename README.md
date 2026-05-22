@@ -1,110 +1,163 @@
 # Solomon
 
-**An AI chief of staff that learns how you make decisions, then gradually makes them for you.**
+**A personal chief of staff that learns how you make decisions, then slowly starts making them with you.**
 
-Solomon is a Hermes plugin. It turns any Hermes installation into a domain-specific decision engine for one business owner. It listens, predicts, audits, acts, and earns trust scope by scope over months. It mirrors how a human brain works: predict, get surprised, sleep, forget the unused, remember what matters.
+Solomon watches the choices you make in your business — over emails, meetings, contracts, voice notes — and builds up a picture of how you think. Once it knows you well enough, it starts to help: drafting replies the way you'd write them, flagging things you'd want to know about, eventually handling small decisions on its own when you give it permission.
 
-## Install
+It's a plugin for [Hermes Agent](https://github.com/NousResearch/hermes-agent). If you already use Hermes, Solomon turns it into something focused on one specific person and one specific business — yours.
 
-```bash
-curl -fsSL https://raw.githubusercontent.com/YOUR_GH/solomon/main/install.sh | bash
-```
+## Who this is for
 
-That's it. The installer:
-1. Detects or installs Hermes.
-2. Installs Solomon as a pip plugin (`hermes_agent.plugins` entry point).
-3. Provisions Postgres (local Docker or remote Supabase, your choice).
-4. Runs schema migrations.
-5. Creates your tenant's GitHub repo for foundation files.
-6. Launches the first-run wizard: industry picker, six interview sessions.
-7. Enters observe-only mode.
+One business owner running one business. Solomon is built for a single person who makes a lot of decisions, has more context in their head than they can write down, and would like some of that context to live somewhere outside their head.
 
-After install, every Hermes session you run is Solomon. The brain learns from everything you do.
+It is not built for teams sharing one instance, not built for general assistant use, and not built for people who want an LLM with extra steps. The whole point is that it gets to know *you*.
 
-## Onboarding (the first thing you do after install)
+## How it works, in plain terms
 
-A new tenant cannot start at zero. The brain needs a foundation. Onboarding has two parts that both have to happen before the brain goes live:
+Solomon has three jobs.
 
-**1. The six-session interview** (~6-10 hours total, spread over 1-2 weeks)
+**1. It listens.** Every message, voice note, email, or file you point it at gets read, stored, and indexed so it can be searched later by meaning, not just keywords. Personal stuff like phone numbers, emails, and ID numbers is stripped out before anything is stored. Files you mark sensitive don't get indexed at all.
 
-```bash
-solomon onboard session_1   # Belief and worldview
-solomon onboard session_2   # The why
-solomon onboard session_3   # Principles
-solomon onboard session_4   # Ideal outcomes
-solomon onboard session_5   # Non-negotiables
-solomon onboard session_6   # Domain map
-```
+**2. It thinks before it speaks.** When something needs a decision, Solomon does two things in parallel:
+   - A fast guess based on rules it already knows about you
+   - A slower, more careful answer that pulls in your principles, your history, and the full situation
 
-Each session asks 5-10 structured questions, transcribes voice or accepts text, and writes the answers into a YAML foundation file (`~/.hermes/solomon/foundation/`).
+   It compares the two. The gap between them tells it how confident to be. Then a third pass (the "audit gate") checks the answer against your non-negotiables before anything leaves the system.
 
-**2. The historical ingestion** (the big batch dump)
+**3. It earns trust gradually.** Every scope of decision (replying to a customer, scheduling a meeting, approving a small expense) has four levels:
+   - **Watch** — Solomon just observes
+   - **Suggest** — Solomon tells you what it would do
+   - **Act with approval** — Solomon drafts the action; you click yes
+   - **Act alone** — Solomon does it without asking
 
-This is how the brain gets the years of context the interview alone can't cover. Drop old emails, contracts, transcripts, SOPs, customer feedback, internal docs — anything that contains decisions you've made.
+   Scopes start at "watch" and only move up after a track record. Override Solomon and the scope drops back down. Time alone never raises trust; only evidence does.
+
+While you sleep, twelve background jobs run: comparing predictions against what actually happened, archiving rules that haven't been used, looking for contradictions in your principles, backing up your data, and queuing things for you to review next time you check in.
+
+## What you need to do
+
+There are three things to do, in order. The first two are required before Solomon does anything useful. The third is optional but recommended.
+
+### Step 1 — Install
 
 ```bash
-solomon ingest path/to/old/emails/*.eml \
-                path/to/proposals/*.pdf \
-                path/to/sops/*.md \
-                path/to/transcripts/*.txt
-
-# Anything you don't want indexed at all (medical records, legal, family stuff):
-solomon ingest --flag-sensitive path/to/private/file.pdf -- path/to/normal/file.txt
+curl -fsSL https://raw.githubusercontent.com/kelix42/solomon/main/install.sh | bash
 ```
 
-The ingestion pipeline:
-1. Strips PII (SSN, SIN, credit cards, phones, passports, email addresses) before anything else sees the text
-2. Classifies each document (email thread, contract, transcript, SOP, etc.)
-3. Chunks it the right way for its type (emails by message, transcripts by speaker turn, contracts by section)
-4. Embeds each chunk locally so the brain can search by meaning later (no API calls, nothing leaves your machine for this step)
-5. Extracts the decisions inside (situation, options, decision, reasoning, outcome)
-6. Mines patterns across all your documents and proposes heuristics ("In 23 of 31 pricing decisions, after-hours work was charged 20-25% above base — looks like an implicit rule")
-7. Cross-references documents that reference each other
+The installer detects or installs Hermes, installs Solomon as a plugin, sets up storage on your laptop (SQLite by default — a single file at `~/.hermes/solomon/solomon.db`, no database server needed), runs the schema, and registers the nightly job.
 
-Then you review what was found:
+If you'd rather use Postgres, set `SOLOMON_DB_URL=postgresql://...` before running the installer. SQLite is the default because it just works.
+
+### Step 2 — The onboarding interview
+
+You sit down with Solomon for seven sessions, roughly an hour each, spread over a week or two. Each one is a conversation, not a form. Solomon asks open questions; you answer however feels natural; Solomon writes the answers down in a way it can use later.
 
 ```bash
-solomon ingestion review
+solomon onboard session_0   # Industry — what business you're in, who your customers are
+solomon onboard session_1   # Belief system — how you see the world
+solomon onboard session_2   # Why — what you're actually trying to build
+solomon onboard session_3   # Principles — your decision rules
+solomon onboard session_4   # Ideal outcomes — what "good" looks like
+solomon onboard session_5   # Non-negotiables — things you will never do
+solomon onboard session_6   # Scopes — which kinds of decisions you'd want help with
 ```
 
-Walk through each proposed heuristic with approve/reject/defer. Only approved heuristics enter the brain's active rule set.
+You can stop and resume at any time. If you walk away mid-session, the next time you run the command it picks up exactly where you left off.
 
-**After both parts are done, the brain enters observe-only mode for 30 days.** It captures everything, predicts, audits, and logs — but takes no actions. After 30 days of clean track record, scopes can begin moving up the autonomy ladder.
+The output of these seven sessions lives in `~/.hermes/solomon/foundation/` as seven YAML files. You can open them and edit them by hand — Solomon will notice and flag the changes for you to confirm next time you check in.
 
-## What you get
+### Step 3 — The historical dump (optional but powerful)
 
-- **Capture.** Every message on every channel becomes a `RawEvent`. Gmail, Twilio, Plaud, voice notes, webhooks.
-- **Salience scoring.** The brain rates how much each event matters. Stakes, novelty, emotion, owner involvement.
-- **Predict before reason.** System 1 (Sonnet, rules only) and System 2 (Opus, full context) both answer. The gap between them is the surprise score, which drives learning.
-- **Audit gate.** A separate model call checks every proposed action against your principles and non-negotiables before it ships.
-- **Autonomy ladder.** Four levels per scope: watch → suggest → act with approval → act alone. Trust earned through track record, lost on overrides.
-- **Sleep cycle.** Every night, eight jobs run: hindsight, archival, surprise replay, stress test, conflict detection, working memory cleanup, autonomy re-evaluation, mentoring scheduler.
-- **Predictions and counterfactuals.** Every decision logs what we expect to happen and what we'd expect if we'd chosen differently. Calibration improves much faster than outcome-only learning.
-- **Heuristic lifecycle.** Rules are versioned, evidence-based, with active/fragile/archived/superseded states. Confidence rises with success, falls with overrides. Time alone never lowers confidence.
-- **Onboarding.** Structured six-session interview fills foundation files (beliefs, why, principles, non-negotiables, ideal outcomes, taxonomy).
-- **Ingestion.** Bulk-upload years of historical email, contracts, transcripts. The brain extracts decisions, mines heuristics, seeds memory.
+This is where you give Solomon the years of context the interview can't cover. Old emails, contracts, transcripts of customer calls, SOPs, anything that records decisions you've already made. The more you feed it, the faster it learns your patterns.
+
+```bash
+solomon corpus ingest path/to/old/emails/*.eml \
+                      path/to/proposals/*.pdf \
+                      path/to/transcripts/*.txt
+```
+
+You can also point it at a folder and let the watcher pick up new files as they land:
+
+```bash
+solomon corpus watch    # long-running; leave it open in a terminal or run as a service
+```
+
+For files you don't want Solomon to learn from at all (medical records, family stuff, anything legally sensitive), use the sensitive flag and they'll be stored but not indexed or learned from:
+
+```bash
+solomon corpus ingest --flag-sensitive path/to/private/file.pdf
+```
+
+Once Solomon has processed your corpus, it'll have spotted patterns and proposed rules it thinks you live by. You review those one by one:
+
+```bash
+solomon mentoring review
+```
+
+For each proposal: approve, reject, edit, or skip. Only the ones you approve become active rules.
+
+## Day-to-day use
+
+After install and onboarding, every Hermes conversation flows through Solomon. You don't need to do anything special — open Hermes, talk to it, and Solomon is listening underneath.
+
+A few commands you'll use regularly:
+
+| Command | What it does |
+|---|---|
+| `solomon doctor` | Health check — confirms storage, plugin registration, cron job all look right |
+| `solomon corpus stats` | How many documents, chunks, and rules Solomon has |
+| `solomon corpus lint` | Looks for broken references, orphan embeddings, files Solomon thinks it has but doesn't |
+| `solomon mentoring review` | Walk through anything Solomon has queued for you to look at |
+| `solomon sleep` | Run the nightly cycle on demand instead of waiting for 2 a.m. |
 
 ## Private mode
 
-Sometimes you want the LLM for something unrelated to the business. Run `/private`. Nothing gets logged, classified, audited, or remembered until you toggle it off or end the session.
+Sometimes you want to use the LLM for something unrelated to the business — a personal question, helping a friend, whatever. Type `/private` in any conversation. Nothing in that conversation gets logged, indexed, classified, or learned from until you toggle it off or end the session.
 
-Private means private. There's no recovery — if you forget you're in private mode and have a real business conversation, that data is gone. The cost of an occasional forgotten conversation is small. The cost of users not trusting the kill switch is large.
+**Private means private.** There is no undo. If you forget you're in private mode and have a real business conversation, that data is gone forever. We chose this on purpose — the cost of an occasional forgotten conversation is much smaller than the cost of you not trusting the off switch.
 
-The non-negotiable check still runs in private mode. The kill switch turns off learning, not guardrails.
+One thing still runs in private mode: the non-negotiable check. Private mode turns off *learning*, not the guardrails that stop Solomon from doing something you've told it never to do.
 
-## How Solomon stays compatible with Hermes
+## Where your data lives
 
-Solomon does not reach into Hermes internals. It only uses the public plugin contract: `register_tool`, `register_command`, and the `pre_llm_call` / `post_llm_call` / `on_session_start` / etc. hooks. Hermes commits to keeping that contract stable.
+Everything Solomon knows about you lives in one folder on your machine: `~/.hermes/solomon/`. Inside:
 
-The one file that touches Hermes is `solomon/adapter.py`. If anything in Hermes ever changes shape, that's the only file we update. The rest of Solomon — the conductor, the sleep cycle, the audit gate, all of it — never knows what Hermes version it's running on.
+- `solomon.db` — the main database (a single SQLite file)
+- `foundation/` — the seven YAML files from the interview
+- `corpus/raw/` — the original documents you've ingested
+- `corpus/wiki/` — a structured summary Solomon has built from those documents
+- `backups/` — nightly tarballs of the corpus, kept for 30 days
 
-We also run tests against the adapter on every Hermes release. Anything that breaks shows up in CI before users see it.
+You can back up Solomon by copying that one folder. You can move Solomon to a new machine by copying that one folder. If you ever want to start over, deleting that folder is the whole uninstall.
+
+Local embeddings are computed on your machine using a free 384-dimension model (`sentence-transformers/all-MiniLM-L6-v2`). No external API calls happen during ingestion unless you explicitly opt into OpenAI embeddings.
+
+The only piece that ever calls out to the network is the actual reasoning step (talking to an LLM provider like Anthropic or OpenAI), and that's the same call Hermes was making before Solomon was installed. Solomon doesn't add any new "phone home."
 
 ## Status
 
-Phase 1 (observe-only mode) is the minimum viable build. The brain captures everything, predicts, audits, logs, but does not act. After 30 days of observe mode, scopes can begin moving up the autonomy ladder.
+Solomon is feature-complete for v1. The interview engine, the corpus pipeline, the ten-stage decision pipeline, the conductor, the mentoring review CLI, and all twelve nightly jobs are built and tested (351 tests passing on SQLite as of 2026-05-26).
 
-See `docs/PHASES.md` for what's built, what's scaffolded, and what's planned next.
+The next milestones are real-world: running the first foundation interview live, ingesting a real corpus pack, and watching scopes climb the autonomy ladder over the first 30 days of observe-only mode.
+
+See `BUILD-STATE.md` for the current detailed state of the build.
+
+## How Solomon stays compatible with Hermes
+
+Solomon only talks to Hermes through the public plugin contract: `register_tool`, `register_command`, and the standard hooks (`pre_llm_call`, `post_llm_call`, `on_session_start`, and a few others). Hermes commits to keeping that contract stable, so Solomon updates and Hermes updates can happen independently.
+
+The one file that actually touches Hermes is `solomon/adapter.py`. If anything in Hermes ever changes shape, that's the only file we update. The rest of Solomon — the decision pipeline, the sleep cycle, the audit gate, all of it — never knows what version of Hermes it's running on.
+
+## Kill switch
+
+If anything goes sideways in production, there's a one-line recovery:
+
+```bash
+echo SOLOMON_PIPELINE_DISABLE=1 >> ~/.hermes/.env
+hermes restart
+```
+
+That flips Solomon's decision pipeline off and falls back to the original Hermes behavior. No uninstall, no rollback, no code change. Confirm recovery by sending a message; if Hermes responds normally, you're back to baseline.
 
 ## License
 
@@ -112,4 +165,4 @@ MIT. See LICENSE.
 
 ## Credits
 
-Architected from the Project Solomon design document. Built on top of [Hermes Agent](https://github.com/NousResearch/hermes-agent) by Nous Research.
+Built on top of [Hermes Agent](https://github.com/NousResearch/hermes-agent) by Nous Research.
