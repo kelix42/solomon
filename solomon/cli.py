@@ -11,6 +11,7 @@ Exposes:
   solomon corpus stats         — print manifest + embeddings counts
   solomon corpus forget        — owner-initiated deletion cascade
   solomon corpus lint          — health checks
+  solomon mentoring review     — walk queued corpus rule proposals
   solomon doctor               — health check
   solomon sleep                — run the nightly cycle on demand
   solomon uninstall            — restore pre-Solomon Hermes config
@@ -370,6 +371,30 @@ def _interactive_review() -> int:
     return 0
 
 
+def cmd_mentoring(args: List[str]) -> int:
+    """Mentoring queue subcommands.
+
+    Usage:
+        solomon mentoring review   — walk queued corpus_rule_proposal items
+    """
+    if not args:
+        _print(
+            "Usage: solomon mentoring <review> ...",
+            style="yellow",
+        )
+        return 1
+    sub, rest = args[0], args[1:]
+    if sub == "review":
+        return _mentoring_review(rest)
+    _print(f"Unknown subcommand: mentoring {sub}", style="red")
+    return 1
+
+
+def _mentoring_review(_rest: List[str]) -> int:
+    from .mentoring.review import main as review_main
+    return int(review_main(_rest) or 0)
+
+
 def cmd_doctor() -> int:
     """Run health checks."""
     _print("[bold cyan]Solomon doctor[/]")
@@ -552,6 +577,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         "ingest": lambda: cmd_ingest(rest),
         "ingestion": lambda: cmd_ingestion(rest),
         "corpus": lambda: cmd_corpus(rest),
+        "mentoring": lambda: cmd_mentoring(rest),
         "sleep": lambda: cmd_sleep(),
         "uninstall": lambda: cmd_uninstall(),
     }.get(cmd, lambda: (_print(f"Unknown command: {cmd}", style="red") or 1))()  # type: ignore[func-returns-value]
