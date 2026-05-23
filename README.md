@@ -50,6 +50,8 @@ The installer detects or installs Hermes, installs Solomon as a plugin, sets up 
 
 If you'd rather use Postgres, set `SOLOMON_DB_URL=postgresql://...` before running the installer. SQLite is the default because it just works.
 
+**To update later, run the same command again.** The script detects an existing install and reinstalls from the latest commit on `main`. Your foundation files, corpus, and database are not touched — only the Solomon Python package is replaced.
+
 ### Step 2 — The onboarding interview
 
 You sit down with Solomon for seven sessions, roughly an hour each, spread over a week or two. Each one is a conversation, not a form. Solomon asks open questions; you answer however feels natural; Solomon writes the answers down in a way it can use later.

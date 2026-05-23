@@ -7,16 +7,25 @@
 #   bash install.sh --dry-run        # show every command, run nothing
 #   bash install.sh --help
 #
+# Run the same curl command again later to UPDATE — the script detects an
+# existing install and reinstalls from the latest commit on main (or whatever
+# you set SOLOMON_REF= to). Editable installs (pip install -e from a local
+# checkout) are detected and left alone so local edits aren't lost.
+#
 # What it does:
 #   1. Locates (or installs) Hermes — Solomon plugs into Hermes's Python venv.
-#   2. pip-installs solomon-brain (-e . if run from a repo checkout).
-#   3. Runs `solomon init` to provision the DB, scaffold ~/.hermes/solomon/,
+#   2. pip-installs (or upgrades) solomon-brain. Skips when an editable
+#      install is detected — pull the latest with `git pull` in that case.
+#   3. Drops a /bin/bash wrapper next to the existing `hermes` binary on PATH
+#      so `solomon ...` works from any shell.
+#   4. Runs `solomon init` to provision the DB, scaffold ~/.hermes/solomon/,
 #      enable the plugin in Hermes config, register the sleep cron.
-#   4. Prints the onboarding next-steps (7 interview sessions, corpus drop,
-#      mentoring review, autonomy ladder).
+#   5. Restarts the Hermes gateway if it's running.
+#   6. Prints the onboarding next-steps.
 #
 # Re-running this script is safe and idempotent. Each step short-circuits
-# with a "✓ already installed" line when its preconditions are already met.
+# with a "✓ already installed" line when its preconditions are already met,
+# except the pip step which always upgrades from git when not editable.
 
 set -euo pipefail
 
@@ -103,20 +112,48 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" 2>/dev/null && pwd || pwd)
 SOLOMON_REPO="${SOLOMON_REPO:-https://github.com/kelix42/solomon.git}"
 SOLOMON_REF="${SOLOMON_REF:-main}"
 
-solomon_already_installed() {
-    [ "$DRY_RUN" -eq 1 ] && return 1
+# Detect three states:
+#   1. Editable install (pip install -e) → leave alone; the user has a local
+#      checkout that is the source of truth. Overwriting it would silently
+#      lose their work.
+#   2. Local checkout next to install.sh → reinstall editable from this
+#      checkout. Picks up any local changes.
+#   3. Anything else (the common curl-one-liner case) → upgrade from git
+#      with --force-reinstall, so re-running the curl command always pulls
+#      the latest commit on main (or the requested SOLOMON_REF).
+
+solomon_is_editable() {
+    # Detection is read-only — safe to run even in dry-run mode so the
+    # script's dry-run output reflects reality.
+    "$HERMES_PY" -m pip show solomon-brain 2>/dev/null \
+        | grep -q '^Editable project location:'
+}
+
+solomon_is_installed() {
+    # Detection is read-only — safe to run even in dry-run mode.
     "$HERMES_PY" -c 'import solomon' >/dev/null 2>&1
 }
 
-if solomon_already_installed; then
-    ok "solomon-brain already installed in $HERMES_PY"
+if solomon_is_editable; then
+    ed_path="$("$HERMES_PY" -m pip show solomon-brain 2>/dev/null \
+        | awk -F': ' '/^Editable project location:/ {print $2}')"
+    ok "solomon-brain editable install detected at $ed_path"
+    warn "Skipping pip step so your local edits are preserved."
+    warn "To pull upstream changes here, run: cd \"$ed_path\" && git pull"
+elif [ -f "$SCRIPT_DIR/pyproject.toml" ] && grep -q '"solomon-brain"' "$SCRIPT_DIR/pyproject.toml" 2>/dev/null; then
+    say "Installing solomon-brain from local checkout ($SCRIPT_DIR)..."
+    run "\"$HERMES_PY\" -m pip install -e \"$SCRIPT_DIR\""
+    ok "solomon-brain installed (editable)."
 else
-    say "Installing solomon-brain..."
-    if [ -f "$SCRIPT_DIR/pyproject.toml" ] && grep -q '"solomon-brain"' "$SCRIPT_DIR/pyproject.toml" 2>/dev/null; then
-        run "\"$HERMES_PY\" -m pip install -e \"$SCRIPT_DIR\""
+    if solomon_is_installed; then
+        say "Upgrading solomon-brain from ${SOLOMON_REPO}@${SOLOMON_REF}..."
     else
-        run "\"$HERMES_PY\" -m pip install --upgrade \"solomon-brain @ git+${SOLOMON_REPO}@${SOLOMON_REF}\""
+        say "Installing solomon-brain from ${SOLOMON_REPO}@${SOLOMON_REF}..."
     fi
+    # --force-reinstall guarantees we pick up new commits even when the
+    # version string in pyproject.toml hasn't been bumped (the common case
+    # during fast iteration on a tester branch).
+    run "\"$HERMES_PY\" -m pip install --upgrade --force-reinstall \"solomon-brain @ git+${SOLOMON_REPO}@${SOLOMON_REF}\""
     ok "solomon-brain installed."
 fi
 
@@ -259,6 +296,12 @@ $(printf "${BLUE}4. You're now in observe-only mode (autonomy L0)${NC}")
    Solomon will watch and suggest, but won't act on its own. Promote
    autonomy per-scope as you build trust:
        solomon autonomy set <scope> L1   # (lands in a later session)
+
+$(printf "${BLUE}5. To update later${NC}")
+   Run the same curl command again — it detects an existing install and
+   reinstalls from the latest commit on main:
+       curl -fsSL https://raw.githubusercontent.com/kelix42/solomon/main/install.sh | bash
+   Your foundation files, corpus, and database are not touched.
 
 EOF
 
