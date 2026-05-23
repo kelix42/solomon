@@ -112,18 +112,28 @@ def test_register_tool_passes_schema_to_hermes():
     assert ctx.tools[0]["toolset"] == "solomon"
 
 
-def test_register_command_passes_aliases():
+def test_register_command_registers_alias_as_separate_command():
+    """Hermes' PluginContext.register_command has no native aliases support.
+
+    The adapter works around this by registering each alias as its own
+    slash command pointing at the same handler.
+    """
     ctx = FakeCtx()
     a = HermesAdapter(ctx)
+    handler = lambda **kw: "ok"  # noqa: E731
     a.register_command(
         name="private",
         aliases=["priv"],
         description="toggle private mode",
-        handler=lambda **kw: "ok",
+        handler=handler,
     )
-    assert len(ctx.commands) == 1
-    assert ctx.commands[0]["name"] == "private"
-    assert ctx.commands[0]["aliases"] == ["priv"]
+    assert len(ctx.commands) == 2
+    names = sorted(c["name"] for c in ctx.commands)
+    assert names == ["priv", "private"]
+    # Both share the same handler.
+    for cmd in ctx.commands:
+        assert cmd["handler"] is handler
+        assert cmd["description"] == "toggle private mode"
 
 
 def test_is_feature_available_returns_false_when_any_hook_missing():

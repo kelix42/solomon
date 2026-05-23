@@ -1,10 +1,18 @@
-# Solomon — Build State Snapshot (2026-05-23 evening)
+# Solomon — Build State Snapshot (2026-05-23 late evening)
 
 This file is the source of truth for "what state is the build in right now" so we don't lose context between sessions. Update at the end of every working session.
 
 ## Last decision
 
-**Onboarding v2 — skill-driven, LLM-led interview.** v1 was a Python state machine that picked the next question from a deterministic resolution chain. It worked but felt robotic — the LLM only saw individual sub-tasks (reflect, classify intent, render YAML), never the whole interview. v2 inverts the control flow: the conductor injects the relevant SKILL.md + probe library + current state as a system message on every turn during an active interview, and the LLM follows the skill to drive the conversation while calling a small set of DB tools (`solomon_onboarding_capture`, `solomon_onboarding_state`, etc.) for storage. v1 code is intentionally left in place; v2 lives in `solomon/onboarding_v2/`.
+**Plugin now loads in live Hermes gateway.** Session D shipped Onboarding v2 with passing tests but `/onboard` returned `Unrecognized slash command` on Telegram. Two registration bugs were blocking real plugin load:
+
+1. **Wrong entry-point shape.** `pyproject.toml` had `solomon = "solomon.plugin:register"` (function ref). Hermes' `_load_entrypoint_module` calls `ep.load()` then `getattr(module, "register", None)` — when the entry point is a function ref, `module` IS the function, so `getattr` returns `None` and the plugin fails with "no register() function". Fixed: entry point is now `solomon = "solomon.plugin"` (module ref). Re-install with `pip install -e . --no-deps` to refresh dist-info.
+2. **`PluginContext.register_command` does not accept `aliases`.** Solomon's adapter was passing `aliases=...` and the plugin load aborted on `/private`. Hermes only supports name+handler+description+args_hint. Fixed in `solomon/adapter.py::register_command` — it now registers each alias as its own slash command pointing at the same handler. Updated `tests/test_adapter.py::test_register_command_registers_alias_as_separate_command` accordingly.
+3. **Plugin opt-in required.** Pip-installed plugins are opt-in via `plugins.enabled` in `~/.hermes/config.yaml`. The user's config had no `plugins:` key at all, so Solomon was discovered but skipped. Added `plugins.enabled: [solomon]` to the config. Documented in install.sh's responsibilities — TODO: install.sh should add this automatically on first install.
+
+**Live verification:** gateway restarted clean. agent.log shows `Solomon ready. Hooks live: on_session_start, on_session_end, pre_llm_call, post_llm_call, pre_tool_call, post_tool_call, pre_gateway_dispatch. Hooks unavailable: (none).` Telegram menu went from 124 hidden cmds → 134 (+10: `/private /priv /endprivate /onboard /interview /endinterview /endonboard /abandon /onboarding /interviews`).
+
+Tests: 376/376 still passing.
 
 ### Session D — Skill-driven onboarding (2026-05-23 evening)
 

@@ -69,7 +69,7 @@ all = [
 solomon = "solomon.cli:main"
 
 [project.entry-points."hermes_agent.plugins"]
-solomon = "solomon.plugin:register"
+solomon = "solomon.plugin"
 
 [project.urls]
 Homepage = "https://github.com/kelix42/solomon"

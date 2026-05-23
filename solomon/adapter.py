@@ -207,22 +207,35 @@ class HermesAdapter:
     ) -> None:
         """Register a slash command (e.g. /private). Delegates to
         ``ctx.register_command``.
+
+        Hermes' ``PluginContext.register_command`` does not natively support
+        aliases, so we register each alias as its own slash command pointing
+        at the same handler. The first registration uses the canonical name;
+        subsequent ones use the alias names. Failure on the canonical name is
+        fatal; failures on aliases are logged but don't raise (the canonical
+        command still works).
         """
-        try:
-            self._ctx.register_command(
-                name=name,
-                aliases=aliases or [],
-                description=description,
-                handler=handler,
-            )
-            self._registered_commands.append(name)
-            logger.debug("Registered Solomon slash command: /%s", name)
-        except Exception as e:  # noqa: BLE001
-            raise AdapterError(
-                f"Failed to register Solomon slash command '/{name}': {e}. "
-                "Solomon expects the Hermes PluginContext.register_command API. "
-                "If Hermes renamed this method, update solomon/adapter.py."
-            ) from e
+        names_to_register = [name] + list(aliases or [])
+        for idx, n in enumerate(names_to_register):
+            try:
+                self._ctx.register_command(
+                    name=n,
+                    description=description,
+                    handler=handler,
+                )
+                self._registered_commands.append(n)
+                logger.debug("Registered Solomon slash command: /%s", n)
+            except Exception as e:  # noqa: BLE001
+                if idx == 0:
+                    raise AdapterError(
+                        f"Failed to register Solomon slash command '/{n}': {e}. "
+                        "Solomon expects the Hermes PluginContext.register_command API. "
+                        "If Hermes renamed this method, update solomon/adapter.py."
+                    ) from e
+                logger.warning(
+                    "Could not register alias '/%s' for /%s: %s",
+                    n, name, e,
+                )
 
     # -- config / logging passthroughs --------------------------------------
 
