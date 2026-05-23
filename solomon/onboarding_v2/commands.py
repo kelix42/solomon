@@ -78,6 +78,33 @@ class OnboardingCommands:
             handler=self._handle_status,
         )
 
+    # -- helpers ------------------------------------------------------------
+
+    def _db_status(self, db_session_id: str) -> str:
+        """Return the current status string for a session row, or '' if missing.
+
+        Used by ``/onboard`` to detect stale in-memory registry entries
+        (the DB row is the source of truth; the registry is just a cache).
+        """
+        try:
+            from ..storage.pool import cursor, execute, get_conn
+            with get_conn() as conn:
+                with cursor(conn) as cur:
+                    execute(
+                        cur,
+                        "SELECT status FROM sessions WHERE session_id=?",
+                        (db_session_id,),
+                    )
+                    row = cur.fetchone()
+                    if row is None:
+                        return ""
+                    if hasattr(row, "keys"):
+                        return row["status"] or ""
+                    return row[0] or ""
+        except Exception as e:  # noqa: BLE001
+            logger.warning("could not read db status for %s: %s", db_session_id, e)
+            return ""
+
     # -- handlers -----------------------------------------------------------
 
     def _handle_onboard(self, args: str = "", session_id: str = "", **kwargs: Any) -> str:
@@ -86,14 +113,26 @@ class OnboardingCommands:
             valid = ", ".join(sorted(SESSION_KEY_TO_DOMAIN.keys()))
             return f"Unknown session key '{key}'. Valid: {valid}."
 
-        # Refuse to overwrite an active session.
+        # Refuse to overwrite an active session — but only if the DB row
+        # actually still says it's open. If the registry holds a stale entry
+        # for a session that was abandoned or completed out-of-band (e.g. via
+        # the solomon_onboarding_abandon tool, or another channel), drop it
+        # and fall through to open_or_resume so /onboard always recovers.
         existing = self.registry.get(session_id)
         if existing is not None:
-            return (
-                f"You're already in onboarding {existing.domain} "
-                f"(session id {existing.db_session_id}). "
-                f"Type /endinterview to abandon it, or finish answering first."
+            db_status = self._db_status(existing.db_session_id)
+            if db_status == "open":
+                return (
+                    f"You're already in onboarding {existing.domain} "
+                    f"(session id {existing.db_session_id}). "
+                    f"Type /endinterview to abandon it, or finish answering first."
+                )
+            # Stale registry entry — clear it and proceed.
+            logger.info(
+                "Dropping stale registry entry for %s (db status=%s)",
+                existing.db_session_id, db_status,
             )
+            self.registry.clear(session_id)
 
         try:
             iv, resumed = session_mod.open_or_resume(key)

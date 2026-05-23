@@ -1,10 +1,29 @@
-# Solomon — Build State Snapshot (2026-05-23 late evening)
+# Solomon — Build State Snapshot (2026-05-24)
 
 This file is the source of truth for "what state is the build in right now" so we don't lose context between sessions. Update at the end of every working session.
 
 ## Last decision
 
-**Plugin now loads in live Hermes gateway.** Session D shipped Onboarding v2 with passing tests but `/onboard` returned `Unrecognized slash command` on Telegram. Two registration bugs were blocking real plugin load:
+**`/onboard` recovers from stale registry entries.** Live bug Kekeli hit: after the agent called `solomon_onboarding_abandon` via the tool (which flips the DB row to `abandoned`), `/onboard session_0` kept refusing with "You're already in onboarding industry …" forever. The refusal lived in `_handle_onboard` and checked only the in-memory `OnboardingSessionRegistry`, not the DB. The DB row is the source of truth; the registry is just a cache.
+
+Fix in `solomon/onboarding_v2/commands.py`:
+
+1. New `_db_status(session_id)` helper reads the row's `status` column through the pool API.
+2. `_handle_onboard` still consults the registry first, but now only refuses if `_db_status(...) == "open"`. Any other status (`abandoned`, `complete`, or missing) means the entry is stale → drop it via `self.registry.clear(session_id)` and fall through to `open_or_resume`, which creates a fresh row.
+
+`/endinterview` was already the manual recovery path; this just makes `/onboard` self-heal so the tool-call-then-/onboard path works without a workaround.
+
+Tests: 378/378 (376 → 378). Two new in `TestSlashCommands`:
+- `test_onboard_recovers_from_stale_registry_entry` — simulates the live bug (open → abandon DB row out-of-band → /onboard again must open a new row).
+- `test_onboard_still_refuses_when_db_row_is_actually_open` — belt-and-suspenders: the truly-open path still refuses.
+
+Files modified:
+- `solomon/onboarding_v2/commands.py` (+33 / -5)
+- `tests/test_onboarding_v2.py` (+38)
+
+## Last decision (Session D — Skill-driven onboarding plugin load)
+
+Session D shipped Onboarding v2 with passing tests but `/onboard` returned `Unrecognized slash command` on Telegram. Two registration bugs were blocking real plugin load:
 
 1. **Wrong entry-point shape.** `pyproject.toml` had `solomon = "solomon.plugin:register"` (function ref). Hermes' `_load_entrypoint_module` calls `ep.load()` then `getattr(module, "register", None)` — when the entry point is a function ref, `module` IS the function, so `getattr` returns `None` and the plugin fails with "no register() function". Fixed: entry point is now `solomon = "solomon.plugin"` (module ref). Re-install with `pip install -e . --no-deps` to refresh dist-info.
 2. **`PluginContext.register_command` does not accept `aliases`.** Solomon's adapter was passing `aliases=...` and the plugin load aborted on `/private`. Hermes only supports name+handler+description+args_hint. Fixed in `solomon/adapter.py::register_command` — it now registers each alias as its own slash command pointing at the same handler. Updated `tests/test_adapter.py::test_register_command_registers_alias_as_separate_command` accordingly.

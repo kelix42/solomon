@@ -225,6 +225,44 @@ class TestSlashCommands:
         out = adapter.commands["onboard"](args="session_1", session_id="dup")
         assert "already" in out.lower()
 
+    def test_onboard_recovers_from_stale_registry_entry(self, solomon_db):
+        """If the DB row was abandoned out-of-band (e.g. via the onboarding
+        tool), /onboard must drop the stale in-memory registry entry and
+        open a fresh session instead of refusing forever."""
+        from solomon.onboarding_v2 import session as sm
+        from solomon.onboarding_v2.commands import OnboardingCommands
+        from solomon.onboarding_v2.session import OnboardingSessionRegistry
+        adapter = _StubAdapter()
+        reg = OnboardingSessionRegistry()
+        OnboardingCommands(adapter, reg).register_command()
+
+        # 1. Open a session via /onboard.
+        adapter.commands["onboard"](args="session_0", session_id="stale")
+        original = reg.get("stale")
+        assert original is not None
+
+        # 2. Abandon the DB row out-of-band (simulates the tool call path).
+        sm.abandon(original.db_session_id)
+
+        # 3. /onboard session_0 again should NOT refuse — it should open a new row.
+        out = adapter.commands["onboard"](args="session_0", session_id="stale")
+        assert "already" not in out.lower()
+        assert "industry" in out.lower()
+        new_iv = reg.get("stale")
+        assert new_iv is not None
+        assert new_iv.db_session_id != original.db_session_id
+
+    def test_onboard_still_refuses_when_db_row_is_actually_open(self, solomon_db):
+        """Belt-and-suspenders: when the DB really says open, refusal stands."""
+        from solomon.onboarding_v2.commands import OnboardingCommands
+        from solomon.onboarding_v2.session import OnboardingSessionRegistry
+        adapter = _StubAdapter()
+        reg = OnboardingSessionRegistry()
+        OnboardingCommands(adapter, reg).register_command()
+        adapter.commands["onboard"](args="session_0", session_id="real-open")
+        out = adapter.commands["onboard"](args="session_0", session_id="real-open")
+        assert "already" in out.lower()
+
     def test_endinterview_clears_active(self, solomon_db):
         from solomon.onboarding_v2.commands import OnboardingCommands
         from solomon.onboarding_v2.session import OnboardingSessionRegistry
