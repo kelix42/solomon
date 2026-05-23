@@ -75,6 +75,22 @@ This file is the source of truth for "what state is the build in right now" so w
 
 With the four new sleep jobs landed, Solomon is feature-complete for v1. The conductor wire-up is live, the corpus pipeline is live, the interview engine is live, the 12-job sleep cycle is live.
 
+### Live-on-host follow-ups (2026-05-23)
+
+Three install/UX bugs caught during first-host install. All fixed and pushed.
+
+- ✅ **install.sh placeholder bug.** `install.sh` had `SOLOMON_REPO=https://github.com/YOUR_GH/solomon.git` as the fallback default; testers using the curl one-liner hit "Repository not found". Replaced with `kelix42`. Also patched `pyproject.toml` and `plugin.yaml` metadata for the same placeholder (visible in `pip show` and the Hermes plugin listing). Commits `bd1b2a9`, `5e90954`.
+- ✅ **PATH wrapper.** `pip install solomon-brain` lands the entry point at `$VENV/bin/solomon`, which isn't on a normal user's PATH. Install completed successfully but `solomon onboard session_0` failed with command-not-found. Added a `place_path_wrapper` step that drops a thin `/bin/bash` wrapper alongside the existing `hermes` binary on PATH (mirrors the Hermes precedent on Linux at `/usr/local/bin`; picks up `/opt/homebrew/bin/` on Apple Silicon; falls back to `/usr/local/bin/`). Rejects self-referencing exec loops when the venv is on PATH (dev/CI boxes). Idempotent + `--dry-run`-safe. Commit `92d4855`.
+- ✅ **`solomon --help` returned `Unknown command`.** The CLI uses hand-rolled dict-of-lambdas dispatch (no Click/argparse), so `--help`, `-h`, `help` all hit the unknown-command branch unless explicitly aliased. Three-line fix to `main()`'s dispatch guard. Commit `3b7814b`.
+
+### Interview cold-open bug (2026-05-23)
+
+- ✅ **session_0 cold open asked the wrong question.** First turn of the foundation interview pulled a random `fallbacks:` entry instead of "What industry are you in?" — typically landed on "What's a rule about your sector you would give a new owner on day one?", which assumed the industry was already known. Two root causes: (a) `industry.yaml` had no `industry_label` required field (started at `business_category`); (b) `select_next_probe` fell through to domain fallbacks whenever the owner's last answer didn't produce a keyword match (which always happens on turn 1, since `last_answer=""`).
+  - Fix: added `industry_label` as the first required field in `industry.yaml`. Inserted a new step 3 in `select_next_probe` resolution order — "unfilled required field in declaration order" — between keyword match and domain fallback. Now Stage B opens with the first unanswered required field; only after all required fields are filled does it fall through to domain fallbacks.
+  - Added `select_next_probe_with_meta` returning `(probe, field_id_or_None)`, used by the Stage B loop in `session_runner` to pass `extra_keyword_tag=f"field:{rf_id}"` into `_process_owner_turn`. Without this, captures from Stage B required-field prompts wouldn't be tagged and Stage C would re-ask the same field. `select_next_probe` (single-return) kept as a thin wrapper for back-compat with the 8 test call-sites.
+  - All other libraries (`belief_system`, `ideal_outcomes`, `non_negotiables`, `principles`, `scopes`, `why`) already had a sensible first required field. The engine fix gives them the right cold open too as a free byproduct.
+  - Test update: `test_session_0_industry_runs_to_completion` now scripts one extra answer for the industry-label cold open and asserts on the new tag. 351/351 tests still passing.
+
 Remaining items are deployment + first-real-use, not build:
 
 - ❌ Deploy to a real host (the install.sh script is ready; haven't run it on Kekeli's actual box yet).

@@ -129,6 +129,10 @@ def test_session_0_industry_runs_to_completion(
 
     # Stub responses cover discovery + required fields + 1 confirm.
     answers = [
+        # Stage B opener: the engine now prefers the first unfilled
+        # required field over a random domain fallback, so turn 1 always
+        # lands on "What industry are you in?".
+        "Geotechnical engineering — landfill liners and leachate ponds.",
         # Discovery turns. The stub returns 1 capture per turn with keywords
         # ['product', 'industry']; coverage has rows seeded for every probe
         # library keyword. The dry-streak rule will only fire after 6+ probes
@@ -137,8 +141,9 @@ def test_session_0_industry_runs_to_completion(
         "We make custom landfill liners for municipal clients.",
         "Mostly municipal customers in Manitoba and Saskatchewan.",
         "/done",
-        # Required-fields pass: industry library has 7 required_fields,
-        # each gets up to 2 attempts. Provide a one-line answer per field.
+        # Required-fields pass: industry library has 8 required_fields,
+        # each gets up to 2 attempts. The first (industry_label) was
+        # already filled in Stage B above; the remaining 7 come here.
         "construction services",      # business_category
         "engineered landfill liners", # primary_product_or_service
         "mostly businesses",          # customer_orientation
@@ -158,7 +163,7 @@ def test_session_0_industry_runs_to_completion(
 
     assert result["status"] == "complete", result
     assert result["domain"] == "industry"
-    assert result["captures"] >= 7  # at least the seven required-field rows
+    assert result["captures"] >= 8  # at least the eight required-field rows
 
     # The session row should be marked complete.
     with pool.get_conn() as conn:
@@ -170,10 +175,11 @@ def test_session_0_industry_runs_to_completion(
             )
             row = cur.fetchone()
     assert row[0] == "complete"
-    assert int(row[1]) >= 7
+    assert int(row[1]) >= 8
 
     # Each required-field tag should appear on at least one captured row.
     field_ids = [
+        "industry_label",
         "business_category", "primary_product_or_service",
         "customer_orientation", "geographic_scope",
         "revenue_model", "growth_stage", "concentration_risk",

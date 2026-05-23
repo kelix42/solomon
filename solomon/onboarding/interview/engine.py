@@ -249,20 +249,45 @@ def select_next_probe(
 ) -> str:
     """Return the next question to ask the owner.
 
+    Thin wrapper over :func:`select_next_probe_with_meta` that drops the
+    metadata. Kept for back-compat with existing tests; new callers
+    should use the meta variant so they can tag the resulting capture
+    with the right ``field:<id>`` keyword.
+    """
+    probe, _ = select_next_probe_with_meta(session_id, domain, last_answer_text)
+    return probe
+
+
+def select_next_probe_with_meta(
+    session_id: str,
+    domain: str,
+    last_answer_text: str = "",
+) -> Tuple[str, Optional[str]]:
+    """Return ``(probe_text, required_field_id_or_None)`` for the next turn.
+
     No LLM call. Pure SQL + YAML. Order of resolution:
       1. Pending clarification (clarification_queue.status='pending') →
-         render the suggested probe verbatim.
+         render the suggested probe verbatim. Returns ``(probe, None)``.
       2. Keyword match against the owner's last answer → render the
-         highest-priority template with {phrase} substitution.
-      3. Domain fallback (random pick from library's `fallbacks:`).
-      4. Generic fallback (_generic.yaml::fallbacks).
+         highest-priority template with {phrase} substitution. Returns
+         ``(probe, None)``.
+      3. Unfilled required field → ask its prompt verbatim. Prefer
+         declaration order so the most-basic question lands first; this
+         is what makes the cold open of every session start with the
+         right question instead of a random domain fallback. Returns
+         ``(prompt, field_id)`` so the caller can tag the resulting
+         capture with ``field:<id>``.
+      4. Domain fallback (random pick from library's `fallbacks:`).
+         Returns ``(probe, None)``.
+      5. Generic fallback (_generic.yaml::fallbacks). Returns
+         ``(probe, None)``.
     """
     # 1. Pending clarification
     pending = _next_pending_clarification(session_id)
     if pending:
         _, suggestion = pending
         if suggestion and suggestion.strip():
-            return suggestion.strip()
+            return suggestion.strip(), None
 
     library = load_library(domain)
     version = str(library.get("version") or "0.0.0")
@@ -280,21 +305,45 @@ def select_next_probe(
                 phrase = _extract_phrase(last_answer_text)
                 rendered = _render_template(template, phrase)
                 _record_probe_asked(session_id, domain, keyword, version)
-                return rendered
+                return rendered, None
 
-    # 3. Domain fallback
+    # 3. Unfilled required field (declaration order)
+    #
+    # If the owner's last answer didn't produce a keyword match — which
+    # always happens on turn 1 because last_answer is empty — fall back
+    # to the next unanswered required field instead of a random domain
+    # fallback. The first required field in each library is intended to
+    # be the most basic question, so this guarantees a sensible cold open.
+    required = library.get("required_fields") or []
+    rf_ids: List[str] = [
+        str(f["id"]) for f in required
+        if isinstance(f, dict) and f.get("id")
+    ]
+    if rf_ids:
+        # Lazy import — avoids a circular import at module load.
+        from . import coverage as _coverage
+        gaps = _coverage.required_field_gaps(session_id, rf_ids)
+        if gaps:
+            rf_lookup = {f["id"]: f for f in required if isinstance(f, dict) and f.get("id")}
+            field = rf_lookup.get(gaps[0]) or {}
+            prompt = field.get("prompt")
+            if prompt:
+                _record_probe_asked(session_id, domain, f"_required:{gaps[0]}", version)
+                return str(prompt), gaps[0]
+
+    # 4. Domain fallback
     fallbacks: List[str] = list(library.get("fallbacks") or [])
     if fallbacks:
         choice = random.choice(fallbacks)
         _record_probe_asked(session_id, domain, "_fallback", version)
-        return choice
+        return choice, None
 
-    # 4. Generic fallback
+    # 5. Generic fallback
     generic = _load_generic()
     g_fallbacks: List[str] = list(generic.get("fallbacks") or [])
     if g_fallbacks:
         _record_probe_asked(session_id, domain, "_generic", version)
-        return random.choice(g_fallbacks)
+        return random.choice(g_fallbacks), None
 
     # Last-resort safety probe.
-    return "Tell me about the last time that came up in your business."
+    return "Tell me about the last time that came up in your business.", None

@@ -67,6 +67,12 @@ probe_style: |
 # applicable", and "decline to answer" each count as filled and create a
 # captured_items row of type=preference tagged with field:<id>.
 required_fields:
+  - id: industry_label
+    prompt: "What industry are you in?"
+    accepts: ["free_text", "i_dont_know", "not_applicable", "decline_to_answer"]
+    satisfied_when: "captured_items row exists with source_session=this AND keywords contains 'field:industry_label'"
+    follow_up_keywords: []
+
   - id: business_category
     prompt: "At the top level, what category does the business fall under?"
     accepts: ["free_text", "i_dont_know", "not_applicable", "decline_to_answer"]

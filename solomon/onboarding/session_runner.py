@@ -534,13 +534,20 @@ def run_session(
     discovery_captures: List[str] = []
     try:
         while turn < max_discovery_turns:
-            probe = engine_mod.select_next_probe(session_id, domain, last_answer)
+            probe, rf_id = engine_mod.select_next_probe_with_meta(
+                session_id, domain, last_answer
+            )
             owner_text = _prompt_owner(probe, in_fn, turn)
             turn += 1
             if owner_text.lower() in {"/done", "/stop", "/end", "/abort"}:
                 break
+            # If the engine asked a required-field prompt (step 3 in the
+            # resolution order), tag the resulting capture so Stage C
+            # doesn't re-ask the same field.
+            extra_tag = f"field:{rf_id}" if rf_id else None
             new_ids = _process_owner_turn(
-                session_id, domain, turn, owner_text, tenant_id
+                session_id, domain, turn, owner_text, tenant_id,
+                extra_keyword_tag=extra_tag,
             )
             discovery_captures.extend(new_ids)
             last_answer = owner_text
