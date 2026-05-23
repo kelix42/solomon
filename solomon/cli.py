@@ -47,6 +47,39 @@ DEFAULT_DATABASE_URL = "postgresql://solomon:solomon@localhost:5432/solomon"
 HERMES_HOME = Path(os.path.expanduser(os.getenv("HERMES_HOME", "~/.hermes")))
 
 
+def _load_hermes_env() -> None:
+    """Load ~/.hermes/.env into os.environ so Solomon picks up shared keys.
+
+    Hermes itself loads this file at boot; Solomon runs in its own process
+    and would otherwise see no OPENROUTER_API_KEY / SOLOMON_LLM_* vars,
+    leaving the LLM client unconfigured. Existing env vars win over the
+    file so explicit overrides still work.
+    """
+    env_path = HERMES_HOME / ".env"
+    if not env_path.exists():
+        return
+    try:
+        for raw in env_path.read_text(encoding="utf-8").splitlines():
+            line = raw.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            if line.startswith("export "):
+                line = line[len("export "):].lstrip()
+            key, _, value = line.partition("=")
+            key = key.strip()
+            value = value.strip()
+            # strip surrounding quotes
+            if len(value) >= 2 and value[0] == value[-1] and value[0] in ("'", '"'):
+                value = value[1:-1]
+            if key and key not in os.environ:
+                os.environ[key] = value
+    except OSError:
+        pass
+
+
+_load_hermes_env()
+
+
 def _print(msg: str, style: str = "") -> None:
     if HAVE_RICH:
         Console().print(msg, style=style)
