@@ -128,6 +128,78 @@ if [ "$DRY_RUN" -eq 0 ] && [ ! -x "$SOLOMON_BIN" ]; then
     exit 1
 fi
 
+# ---- expose `solomon` on the system PATH -----------------------------------
+#
+# pip installs the entry point inside the Hermes venv (above), which is not on
+# the default user PATH. Without a wrapper the install completes but
+# `solomon onboard session_0` fails with command-not-found.
+#
+# Strategy: place a thin wrapper next to the existing `hermes` binary on PATH
+# (matches Hermes's own /usr/local/bin/hermes shim). Falls back to
+# /usr/local/bin if `hermes` isn't on PATH yet. Idempotent — overwrites any
+# existing wrapper.
+
+place_path_wrapper() {
+    local target_dir=""
+    local venv_bin
+    venv_bin="$(dirname "$SOLOMON_BIN")"
+
+    # First choice: alongside the existing `hermes` binary on PATH.
+    # Resolve via `command -v`, but reject the venv bin itself — if the venv
+    # is on PATH (dev boxes, some Hermes installs) `command -v` returns
+    # the venv hermes, which would make our wrapper a self-referencing loop.
+    if command -v hermes >/dev/null 2>&1; then
+        local hermes_path
+        hermes_path="$(command -v hermes)"
+        local hermes_dir
+        hermes_dir="$(dirname "$hermes_path")"
+        if [ "$hermes_dir" != "$venv_bin" ]; then
+            target_dir="$hermes_dir"
+        fi
+    fi
+
+    # Fallback to /usr/local/bin if the hermes-sibling directory is missing,
+    # is the venv itself, or isn't writable.
+    if [ -z "$target_dir" ] || { [ "$DRY_RUN" -eq 0 ] && [ ! -w "$target_dir" ]; }; then
+        target_dir=/usr/local/bin
+    fi
+
+    # Final writability check (skipped in dry-run since we're not really writing).
+    if [ "$DRY_RUN" -eq 0 ] && [ ! -w "$target_dir" ]; then
+        err "Cannot write to $target_dir (need sudo?). Re-run with sudo, or"
+        err "manually create the wrapper:"
+        err "    sudo ln -sf $SOLOMON_BIN /usr/local/bin/solomon"
+        return 1
+    fi
+
+    local wrapper="$target_dir/solomon"
+
+    # Defence-in-depth: a wrapper that exec's itself would loop forever.
+    # This can't happen given the venv-bin check above, but cheap to verify.
+    if [ "$wrapper" = "$SOLOMON_BIN" ]; then
+        err "Refusing to write wrapper at $wrapper — same path as the venv entry point."
+        return 1
+    fi
+
+    if [ "$DRY_RUN" -eq 1 ]; then
+        printf "  [dry-run] write wrapper to %s exec'ing %s\n" "$wrapper" "$SOLOMON_BIN"
+        printf "  [dry-run] chmod +x %s\n" "$wrapper"
+        ok "solomon command would be available at $wrapper"
+        return 0
+    fi
+
+    # Heredoc: $SOLOMON_BIN expands now (resolves to the venv path), but
+    # \$@ stays literal so the wrapper forwards arguments at run time.
+    cat > "$wrapper" <<EOF
+#!/bin/bash
+exec "$SOLOMON_BIN" "\$@"
+EOF
+    chmod +x "$wrapper"
+    ok "solomon command available on PATH ($wrapper)"
+}
+
+place_path_wrapper || exit 1
+
 # ---- run solomon init (idempotent inside the CLI) --------------------------
 
 solomon_init_already_done() {
