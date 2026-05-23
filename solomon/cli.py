@@ -566,7 +566,7 @@ def _install_cron_jobs() -> None:
 
 def main(argv: Optional[List[str]] = None) -> int:
     argv = list(argv or sys.argv[1:])
-    if not argv:
+    if not argv or argv[0] in ("-h", "--help", "help"):
         print(__doc__)
         return 0
     cmd, rest = argv[0], argv[1:]
