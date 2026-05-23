@@ -62,8 +62,23 @@ def register(ctx):  # noqa: ANN001  (Hermes passes its own ctx type)
     # Wire Solomon's tools into Hermes's tool registry.
     conductor.register_tools()
 
+    # Skill-driven onboarding tools (six tools the LLM calls during interviews).
+    try:
+        from .onboarding_v2.tools import register_tools as register_onboarding_tools
+        register_onboarding_tools(adapter)
+    except Exception as e:  # noqa: BLE001
+        logger.warning("Could not register onboarding tools: %s", e)
+
     # Wire the /private command.
     private_mode.register_command()
+
+    # Wire /onboard, /endinterview, /onboarding (status).
+    try:
+        from .onboarding_v2.commands import OnboardingCommands
+        onboarding_commands = OnboardingCommands(adapter, conductor.onboarding_registry)
+        onboarding_commands.register_command()
+    except Exception as e:  # noqa: BLE001
+        logger.warning("Could not register onboarding slash commands: %s", e)
 
     # Attach to lifecycle hooks.
     conductor.attach_hooks()

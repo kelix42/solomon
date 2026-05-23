@@ -1,6 +1,36 @@
-# Solomon — Build State Snapshot (2026-05-26)
+# Solomon — Build State Snapshot (2026-05-23 evening)
 
 This file is the source of truth for "what state is the build in right now" so we don't lose context between sessions. Update at the end of every working session.
+
+## Last decision
+
+**Onboarding v2 — skill-driven, LLM-led interview.** v1 was a Python state machine that picked the next question from a deterministic resolution chain. It worked but felt robotic — the LLM only saw individual sub-tasks (reflect, classify intent, render YAML), never the whole interview. v2 inverts the control flow: the conductor injects the relevant SKILL.md + probe library + current state as a system message on every turn during an active interview, and the LLM follows the skill to drive the conversation while calling a small set of DB tools (`solomon_onboarding_capture`, `solomon_onboarding_state`, etc.) for storage. v1 code is intentionally left in place; v2 lives in `solomon/onboarding_v2/`.
+
+### Session D — Skill-driven onboarding (2026-05-23 evening)
+
+- ✅ **Drive skills copied to `~/.hermes/skills/solomon-onboarding/`.** All 14 SKILL.md files from `Project Solomon/Solomon/skills/` (`onboarding/*`, `interview/*`) now visible to Hermes — `hermes skills list` enumerates them under the `solomon-onboarding` category. Two frontmatter fixes applied (the Drive export smushed `author: Lynx + Sunny---` onto one line).
+- ✅ **`solomon/onboarding_v2/session.py` — NEW.** `OnboardingSessionRegistry` (per-process map of `hermes_session_id -> ActiveInterview`), `ensure_tenant`, `open_or_resume(session_key)`, `abandon`, `complete`, `increment_turn_count`. Session-key map: `session_0` -> `industry`, ..., `session_6` -> `scopes`. Domain -> skill-name map mirrors the Drive umbrella skill.
+- ✅ **`solomon/onboarding_v2/tools.py` — NEW.** Five LLM-callable tools registered under toolset `solomon`:
+  - `solomon_onboarding_state` — returns captures so far, which required_fields are filled vs unfilled (with prompts), and `complete_ready`. Called by the LLM before deciding the next question.
+  - `solomon_onboarding_capture` — writes a `captured_items` row with optional `field:<id>` tag in keywords. Default type `preference`; LLM picks `belief` / `non_negotiable` / `rule` / etc. when appropriate.
+  - `solomon_onboarding_complete` — refuses unless all required_fields are filled (or `force=true`); renders the foundation YAML via the v1 helper `_render_foundation`; flips session status to `complete`.
+  - `solomon_onboarding_abandon` — flips status to `abandoned`. Captures preserved.
+  - `solomon_onboarding_list` — lists sessions for the active tenant filtered by status.
+- ✅ **`solomon/onboarding_v2/commands.py` — NEW.** Three slash commands:
+  - `/onboard <session_key>` (alias `/interview`) — opens or resumes the row, registers in the conductor's `onboarding_registry`, prints a kickoff message. Refuses to overwrite an active session.
+  - `/endinterview` (aliases `/endonboard`, `/abandon`) — clears registry entry + flips status to `abandoned`. Captures preserved.
+  - `/onboarding` (alias `/interviews`) — status command listing all sessions per ordinal.
+- ✅ **`solomon/conductor.py` — MODIFIED.** Three additions:
+  - `Conductor.__init__` now instantiates `self.onboarding_registry`.
+  - `_pre_llm_call` checks `_onboarding_disabled()` then calls `_maybe_inject_onboarding(session_id, messages)` BEFORE the existing pipeline. If an active interview exists for this session_id, the method injects the SKILL.md body + interview state JSON + listening discipline + meta-question handling as a system message at the end of `messages` (preserves prompt caching — does NOT touch `TurnContext.system_prompt`) and returns True. `_pre_llm_call` returns early, bypassing the 10-stage decision pipeline (interview turns are not decisions).
+  - New env var `SOLOMON_ONBOARDING_DISABLE`. Truthy = skip the onboarding branch entirely, fall through to the existing pipeline path bit-for-bit. Recovery: `echo SOLOMON_ONBOARDING_DISABLE=1 >> ~/.hermes/.env && hermes gateway restart`.
+- ✅ **`solomon/plugin.py` — MODIFIED.** `register(ctx)` now also calls `register_onboarding_tools(adapter)` and `OnboardingCommands(adapter, conductor.onboarding_registry).register_command()`. Both wrapped in try/except + warning log so a failure doesn't break plugin startup.
+- ✅ **Tests: 376/376 passing on SQLite** (351 → 376). 25 new tests across `tests/test_onboarding_v2.py`:
+  - 5 session-lifecycle tests (open/resume/abandon/complete + invalid key).
+  - 8 tool tests (state, capture, complete refuse/force, abandon, list, missing args, field tag propagation).
+  - 7 slash-command tests (start/default/invalid/duplicate/end/status).
+  - 5 conductor injection tests (no-active passes through, active injects, skill md included, messages=None safe, kill-switch env var parsing).
+- ✅ **End-to-end plugin smoke test.** `/tmp/smoke_test_plugin.py` builds a fake Hermes ctx, runs `solomon.plugin.register(ctx)`, confirms 5 onboarding tools + 3 slash commands + 7 lifecycle hooks register. Existing tools (audit, salience, log_decision) still register — no regressions.
 
 ## Last decision
 

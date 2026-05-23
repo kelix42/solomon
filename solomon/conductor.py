@@ -102,6 +102,19 @@ def _pipeline_mode() -> str:
     return raw or "inline"
 
 
+def _onboarding_disabled() -> bool:
+    """Return True iff SOLOMON_ONBOARDING_DISABLE is set to a truthy value.
+
+    Kill-switch for the skill-driven onboarding injection. Recovery for
+    the wild: ``echo SOLOMON_ONBOARDING_DISABLE=1 >> ~/.hermes/.env``
+    and restart Hermes. With the switch on, ``_pre_llm_call`` skips the
+    onboarding branch entirely and the rest of the conductor runs
+    bit-for-bit identical to before this feature landed.
+    """
+    val = os.getenv("SOLOMON_ONBOARDING_DISABLE", "")
+    return val.strip().lower() in {"1", "true", "yes", "on"}
+
+
 # ---------------------------------------------------------------------------
 # TurnContext
 # ---------------------------------------------------------------------------
@@ -193,6 +206,12 @@ class Conductor:
         self.predictions = PredictionStore(adapter)
         self.counterfactuals = CounterfactualStore(adapter)
 
+        # Skill-driven onboarding registry. The /onboard slash command
+        # writes here; _pre_llm_call reads here to decide whether to
+        # inject the SKILL.md body + state for the current turn.
+        from .onboarding_v2.session import OnboardingSessionRegistry
+        self.onboarding_registry = OnboardingSessionRegistry()
+
     # -- registration -------------------------------------------------------
 
     def register_tools(self) -> None:
@@ -273,6 +292,21 @@ class Conductor:
         """
         if self.private_mode.is_active(session_id):
             return
+
+        # Skill-driven onboarding: if there's an active interview for this
+        # Hermes session, inject the SKILL.md body + current interview
+        # state as a system message, then short-circuit the pipeline
+        # (interview turns are not decisions).
+        if not _onboarding_disabled():
+            try:
+                if self._maybe_inject_onboarding(session_id, messages):
+                    return
+            except Exception as e:  # noqa: BLE001
+                logger.exception(
+                    "onboarding injection failed for session %s; "
+                    "falling through to normal pipeline: %s",
+                    session_id, e,
+                )
 
         turn = self._turns.setdefault(str(session_id), TurnContext())
         turn.started_at = time.time()
@@ -518,6 +552,87 @@ class Conductor:
                 turn.autonomy_level_at_time = f"L{int(eff)}"
             except (TypeError, ValueError):
                 pass
+
+    def _maybe_inject_onboarding(self, session_id: str, messages: Optional[list]) -> bool:
+        """If this session has an active onboarding interview, inject the
+        SKILL.md body + current state + tool-usage instructions as a
+        system message and return True so ``_pre_llm_call`` can return
+        early (interview turns bypass the decision pipeline).
+
+        Returns False if no active interview, or if injection fails. The
+        caller already wraps this in try/except so a thrown exception
+        falls through cleanly to the normal pipeline.
+        """
+        if messages is None:
+            return False
+        iv = self.onboarding_registry.get(str(session_id))
+        if iv is None:
+            return False
+
+        from .onboarding_v2.commands import _skill_path
+        from .onboarding_v2.tools import _tool_state
+
+        skill_md = ""
+        try:
+            p = _skill_path(iv.skill_name)
+            if p.exists():
+                skill_md = p.read_text(encoding="utf-8")
+        except Exception as e:  # noqa: BLE001
+            logger.warning("could not read skill %s: %s", iv.skill_name, e)
+
+        # Current interview state (captures, required_fields, etc.) — fresh
+        # on every turn so the LLM sees the effect of its last capture.
+        state_json = _tool_state({"db_session_id": iv.db_session_id})
+
+        body = (
+            "[Solomon onboarding — active interview]\n"
+            f"You are conducting Solomon onboarding session: {iv.domain} "
+            f"(database session id: {iv.db_session_id}).\n\n"
+            "Load and follow the skill below VERBATIM. The skill describes the "
+            "5-stage flow (Setup, Discovery, Required-fields, Closing checkpoint, Close). "
+            "You are at the discovery / required-fields stage — the session row is "
+            "already open.\n\n"
+            "TOOL USAGE for this interview:\n"
+            "- After every owner answer, call solomon_onboarding_capture once "
+            "  per distinct claim. Use the owner's exact words for verbatim_phrase. "
+            "  Pass field_id when the answer satisfies a required_field listed in "
+            "  the state below.\n"
+            "- Call solomon_onboarding_state if you need to re-check what's been "
+            "  captured.\n"
+            "- When all required_fields are filled AND the owner has confirmed "
+            "  the closing-checkpoint summary, call solomon_onboarding_complete.\n"
+            "- Never call solomon_onboarding_abandon yourself — the owner triggers "
+            "  abandonment via /endinterview.\n\n"
+            "LISTENING DISCIPLINE (the seven rules from the probe library):\n"
+            "1. Use the owner's exact words in your follow-ups. Verbatim phrasing IS the data.\n"
+            "2. Do not editorialize. Reflect, do not interpret.\n"
+            "3. Follow-ups must build on the echoed phrase, or skip the echo entirely.\n"
+            "4. Drop filler ('Got it', 'Right', 'Interesting', 'Tell me more').\n"
+            "5. Short is better. Echo plus one direct question. No preface.\n"
+            "6. Follow emotional or evaluative content when the owner shows feeling.\n"
+            "7. When pivoting, just pivot. Do not fake-echo to soften the transition.\n\n"
+            "HANDLING META-QUESTIONS:\n"
+            "- If the owner says 'I don't understand' or asks you to clarify, "
+            "  rephrase the LAST question plainly. Do not advance.\n"
+            "- If the owner says 'go back' or names a previous answer, look at "
+            "  the captures in state below and answer them about it.\n"
+            "- If the owner asks why you're asking, give a one-sentence reason "
+            "  rooted in the skill, then return to the question.\n\n"
+            "CURRENT INTERVIEW STATE (refreshed every turn):\n"
+            f"{state_json}\n\n"
+            "=== BEGIN SKILL ===\n"
+            f"{skill_md}\n"
+            "=== END SKILL ===\n\n"
+            "Now: read the owner's most recent message, capture what they "
+            "said (if anything), and ask the next question per the skill."
+        )
+
+        try:
+            messages.append({"role": "system", "content": body})
+            return True
+        except Exception as e:  # noqa: BLE001
+            logger.warning("could not append onboarding system message: %s", e)
+            return False
 
     @staticmethod
     def _maybe_inject_system_message(messages: Optional[list], turn: TurnContext) -> None:
