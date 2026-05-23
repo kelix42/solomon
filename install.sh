@@ -2,7 +2,7 @@
 # Solomon one-line installer.
 #
 # Usage:
-#   curl -fsSL https://raw.githubusercontent.com/YOUR_GH/solomon/main/install.sh | bash
+#   curl -fsSL https://raw.githubusercontent.com/kelix42/solomon/main/install.sh | bash
 #   bash install.sh                  # from a checkout
 #   bash install.sh --dry-run        # show every command, run nothing
 #   bash install.sh --help
@@ -100,7 +100,7 @@ fi
 # ---- install solomon-brain -------------------------------------------------
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" 2>/dev/null && pwd || pwd)"
-SOLOMON_REPO="${SOLOMON_REPO:-https://github.com/YOUR_GH/solomon.git}"
+SOLOMON_REPO="${SOLOMON_REPO:-https://github.com/kelix42/solomon.git}"
 SOLOMON_REF="${SOLOMON_REF:-main}"
 
 solomon_already_installed() {
