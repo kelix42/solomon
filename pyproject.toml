@@ -72,8 +72,8 @@ solomon = "solomon.cli:main"
 solomon = "solomon.plugin:register"
 
 [project.urls]
-Homepage = "https://github.com/YOUR_GH/solomon"
-Documentation = "https://github.com/YOUR_GH/solomon/tree/main/docs"
+Homepage = "https://github.com/kelix42/solomon"
+Documentation = "https://github.com/kelix42/solomon/tree/main/docs"
 
 [tool.setuptools.packages.find]
 include = ["solomon*"]
