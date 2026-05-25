@@ -17,7 +17,8 @@ from typing import Callable, Optional
 
 import yaml
 
-from . import logs, profile
+from . import adapter as adapter_mod, logs, profile
+from .adapter import HermesAdapter
 
 
 # ANSI colors. Disabled if not a TTY (so log capture stays clean).
@@ -91,7 +92,7 @@ def check_git_repo() -> tuple[str, str, Optional[str]]:
 
 
 def check_skill_files() -> tuple[str, str, Optional[str]]:
-    skill_dir = Path.home() / ".hermes" / "skills" / "solomon"
+    skill_dir = adapter_mod.hermes_skills_dir_for("solomon")
     expected = ("solomon-default.md", "solomon-interview.md",
                 "solomon-ingest.md", "solomon-compress.md")
     if not skill_dir.exists():
@@ -104,36 +105,45 @@ def check_skill_files() -> tuple[str, str, Optional[str]]:
 
 
 def check_hermes_config() -> tuple[str, str, Optional[str]]:
-    cfg = Path.home() / ".hermes" / "config.yaml"
+    cfg = adapter_mod.hermes_config_path()
     if not cfg.exists():
         return "yellow", "~/.hermes/config.yaml missing — Hermes may not be installed", \
                "Install Hermes first, then re-run the Solomon installer."
+    a = HermesAdapter(ctx=None)  # ctx not needed for is_plugin_enabled
     try:
-        data = yaml.safe_load(cfg.read_text(encoding="utf-8")) or {}
-    except yaml.YAMLError as e:
-        return "yellow", f"~/.hermes/config.yaml unparseable: {e}", \
-               "Fix the YAML by hand or restore from config.yaml.pre-solomon."
-    enabled = (data.get("plugins") or {}).get("enabled") or data.get("plugins_enabled") or []
-    if "solomon" not in (enabled if isinstance(enabled, list) else []):
-        return "yellow", "Solomon not in plugins.enabled of Hermes config", \
+        enabled = a.is_plugin_enabled("solomon")
+    except Exception as e:  # noqa: BLE001
+        return "yellow", f"could not check plugins.enabled: {e}", \
                "Re-run the install script."
+    if not enabled:
+        return "yellow", "Solomon not in plugins.enabled of Hermes config", \
+               "Run `hermes plugins enable solomon` or re-run the install script."
     return "green", "Solomon registered in Hermes config", None
 
 
 def check_cron_installed() -> tuple[str, str, Optional[str]]:
+    """Verify Solomon's 17 Hermes cron jobs are registered.
+
+    Solomon registers cron jobs through Hermes's cron API, not the system
+    crontab — so we ask Hermes, not the OS.
+    """
+    a = HermesAdapter(ctx=None)
     try:
-        result = subprocess.run(
-            ["crontab", "-l"], capture_output=True, text=True, check=False
-        )
-        text = result.stdout if result.returncode == 0 else ""
-    except FileNotFoundError:
-        return "yellow", "crontab not available on this system", \
-               "Solomon crons are optional; you can run /reflect manually."
-    needed = ["solomon-brain-daily", "solomon-brain-weekly", "solomon-brain-checkin"]
-    missing = [n for n in needed if n not in text]
+        jobs = a.list_cron_jobs(name_prefix="solomon-")
+    except Exception as e:  # noqa: BLE001
+        return "yellow", f"could not query Hermes cron: {e}", \
+               "Run `solomon register-crons` or re-run the install script."
+    names = {j.get("name") for j in jobs}
+    # Expected: 1 daily + 14 weekly compress + 1 summary + 1 checkin = 17.
+    expected_names = ({"solomon-daily-reflection",
+                        "solomon-regenerate-summary",
+                        "solomon-weekly-checkin"} |
+                       {f"solomon-compress-{p}" for p in profile.PLAYBOOKS})
+    missing = expected_names - names
     if missing:
-        return "yellow", f"Missing cron entries: {missing}", "Re-run the install script."
-    return "green", "All three cron entries present", None
+        return "yellow", f"Missing Hermes cron jobs: {sorted(missing)}", \
+               "Run `solomon register-crons` to (re-)register them."
+    return "green", f"{len(names)} Solomon cron jobs registered with Hermes", None
 
 
 def check_logs_writable() -> tuple[str, str, Optional[str]]:

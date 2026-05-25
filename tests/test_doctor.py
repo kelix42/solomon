@@ -60,3 +60,12 @@ def test_doctor_preferred_channel_green_when_set(solomon_home: Path):
     status, msg, _ = doctor.check_preferred_channel()
     assert status == "green"
     assert "telegram" in msg
+
+
+def test_doctor_cron_check_when_hermes_unavailable(solomon_home: Path):
+    """If cron.jobs can't be imported (no Hermes), we get a yellow, not a
+    crash."""
+    status, _, _ = doctor.check_cron_installed()
+    # Either yellow (Hermes-side missing) or green (real install, all jobs
+    # present). Never red — we don't want doctor to crash on a fresh box.
+    assert status in ("green", "yellow")

@@ -258,55 +258,28 @@ else
     warn "Could not locate skill source directory inside the solomon package."
 fi
 
-# ---- 7. Register the plugin in Hermes config --------------------------------
+# ---- 7. Register the plugin via Hermes's own CLI ----------------------------
+#
+# We back up ~/.hermes/config.yaml once (so `solomon uninstall` can restore
+# it cleanly), then use `hermes plugins enable solomon` — the official path.
+# This avoids hand-editing the YAML and keeps Hermes's own state coherent.
 
 HERMES_CFG="$HOME/.hermes/config.yaml"
-if [ "$DRY_RUN" -eq 0 ]; then
-    if [ -f "$HERMES_CFG" ]; then
-        # Back up the original once.
-        [ ! -f "$HERMES_CFG.pre-solomon" ] && cp "$HERMES_CFG" "$HERMES_CFG.pre-solomon"
-        # Add solomon to plugins.enabled if not already there.
-        if ! grep -q "^  - solomon$" "$HERMES_CFG" 2>/dev/null && ! grep -q "^- solomon$" "$HERMES_CFG" 2>/dev/null; then
-            # Simple append. Users with complex configs can edit by hand.
-            {
-                echo ""
-                echo "# Added by Solomon installer"
-                echo "plugins:"
-                echo "  enabled:"
-                echo "    - solomon"
-            } >> "$HERMES_CFG"
-            ok "Solomon added to $HERMES_CFG"
-        else
-            ok "Solomon already in $HERMES_CFG"
-        fi
-    else
-        warn "$HERMES_CFG does not exist. Hermes may need to be started once first."
-    fi
-else
-    printf "  [dry-run] append 'solomon' to plugins.enabled in %s\n" "$HERMES_CFG"
+if [ -f "$HERMES_CFG" ] && [ ! -f "$HERMES_CFG.pre-solomon" ]; then
+    [ "$DRY_RUN" -eq 0 ] && cp "$HERMES_CFG" "$HERMES_CFG.pre-solomon"
 fi
 
-# ---- 8. Install cron jobs ---------------------------------------------------
+run "\"$HERMES_PY\" -m hermes_cli plugins enable solomon"
 
-if command -v crontab >/dev/null 2>&1; then
-    add_cron() {
-        local marker="$1" schedule="$2" command="$3"
-        if crontab -l 2>/dev/null | grep -q "$marker"; then
-            return 0
-        fi
-        ( crontab -l 2>/dev/null; echo "$schedule $command # $marker" ) | crontab -
-    }
-    if [ "$DRY_RUN" -eq 0 ]; then
-        add_cron "solomon-brain-daily"   "0 2 * * *"  "$HERMES_PY -m solomon.cli daily   >> $HOME/.hermes/solomon/logs/cron.log 2>&1"
-        add_cron "solomon-brain-weekly"  "0 3 * * 0"  "$HERMES_PY -m solomon.cli weekly  >> $HOME/.hermes/solomon/logs/cron.log 2>&1"
-        add_cron "solomon-brain-checkin" "0 15 * * 5" "$HERMES_PY -m solomon.cli checkin >> $HOME/.hermes/solomon/logs/cron.log 2>&1"
-        ok "Crons installed (daily 02:00, weekly Sun 03:00, checkin Fri 15:00)"
-    else
-        printf "  [dry-run] add three crontab entries: daily / weekly / checkin\n"
-    fi
-else
-    warn "crontab not on PATH. Skipping cron setup. You can still run 'solomon daily' manually."
-fi
+# ---- 8. Register cron jobs with Hermes (NOT system crontab) ------------------
+#
+# Per the v3 design, Solomon registers its 17 scheduled jobs through Hermes's
+# own cron API (cron.jobs.create_job). Hermes's gateway scheduler fires them
+# every 60 seconds. This is portable (Windows-compatible when Hermes is),
+# survives reboots without user crontab edits, and integrates with Hermes's
+# auth/credentials/logging.
+
+run "\"$HERMES_PY\" -m solomon.cli register-crons"
 
 # ---- Done -------------------------------------------------------------------
 

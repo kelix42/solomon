@@ -1,20 +1,17 @@
 """`solomon` CLI dispatcher.
 
 Subcommands:
-  solomon init       — scaffold ~/.hermes/solomon/ and run first-time setup
-  solomon doctor     — health check
-  solomon logs       — view structured logs
-  solomon uninstall  — restore Hermes config (data left in place)
-
-Cron subcommands (called by the cron entries directly, but also runnable
-manually for testing):
-  solomon daily      — run nightly reflection + ingestion + nudge
-  solomon weekly     — run weekly compression
-  solomon checkin    — run weekly check-in
-  solomon ingest     — run one ingest pass on the inbox
-
-These match the slash commands' bodies. Slash commands (typed inside
-Hermes) call the same code paths.
+  solomon init             Scaffold ~/.hermes/solomon/ and finish setup.
+  solomon doctor           Health check.
+  solomon logs             View structured logs.
+  solomon register-crons   Register Solomon's 17 cron jobs with Hermes.
+  solomon uninstall-crons  Remove every Solomon cron from Hermes.
+  solomon daily            Fire the daily reflection cron now.
+  solomon weekly           Fire all weekly compression crons now.
+  solomon checkin          Fire the weekly check-in cron now.
+  solomon ingest           Process ~/.hermes/solomon/inbox/ now.
+  solomon uninstall        Restore pre-Solomon Hermes config.
+    --purge                Also delete ~/.hermes/solomon/ after a prompt.
 """
 
 from __future__ import annotations
@@ -38,28 +35,34 @@ def main(argv: Optional[list[str]] = None) -> int:
         return doctor.run()
     if sub == "logs":
         return _cmd_logs(rest)
-    if sub == "uninstall":
-        return _cmd_uninstall()
+    if sub == "register-crons":
+        return _cmd_register_crons()
+    if sub == "uninstall-crons":
+        return _cmd_uninstall_crons()
     if sub == "daily":
         from . import daily
-        result = daily.run()
+        result = daily.run_now()
         print(result)
-        return 0
+        return 0 if result.get("ok") else 1
     if sub == "weekly":
         from . import weekly
-        result = weekly.run()
+        which = rest[0] if rest else "all"
+        result = weekly.run_now(which=which)
         print(result)
-        return 0
+        return 0 if result.get("ok") else 1
     if sub == "checkin":
         from . import checkin
-        result = checkin.run()
+        result = checkin.run_now()
         print(result)
-        return 0
+        return 0 if result.get("ok") else 1
     if sub == "ingest":
         from . import ingest
         result = ingest.process_all()
         print(result)
         return 0
+    if sub == "uninstall":
+        purge = "--purge" in rest
+        return _cmd_uninstall(purge=purge)
 
     print(f"Unknown command: {sub}", file=sys.stderr)
     _print_help(out=sys.stderr)
@@ -71,15 +74,21 @@ def _print_help(out=None) -> None:
     print(
         "Usage: solomon <command> [args]\n\n"
         "Commands:\n"
-        "  init       Scaffold ~/.hermes/solomon/ and finish setup.\n"
-        "  doctor     Check that everything is wired right.\n"
-        "  logs       View structured logs. Flags: --errors, --today, --since DATE,\n"
-        "             --grep PATTERN, --event NAME, --follow.\n"
-        "  daily      Run the nightly reflection + ingestion + nudge cycle now.\n"
-        "  weekly     Run the weekly compression now.\n"
-        "  checkin    Send the weekly check-in now.\n"
-        "  ingest     Process anything in ~/.hermes/solomon/inbox/ now.\n"
-        "  uninstall  Restore the pre-Solomon Hermes config (data is left in place).\n",
+        "  init             Scaffold ~/.hermes/solomon/ and finish setup.\n"
+        "  doctor           Check that everything is wired right.\n"
+        "  logs             View structured logs.\n"
+        "                   Flags: --errors, --today, --since DATE,\n"
+        "                          --grep PATTERN, --event NAME, --follow.\n"
+        "  register-crons   Register the 17 Solomon cron jobs with Hermes.\n"
+        "  uninstall-crons  Remove every Solomon cron job from Hermes.\n"
+        "  daily            Fire the daily reflection cron now.\n"
+        "  weekly [name]    Fire weekly compression jobs.\n"
+        "                   Default: all. Pass a playbook name to compress one,\n"
+        "                   or 'summary' for the profile-summary job.\n"
+        "  checkin          Fire the weekly check-in cron now.\n"
+        "  ingest           Process anything in ~/.hermes/solomon/inbox/ now.\n"
+        "  uninstall        Restore the pre-Solomon Hermes config.\n"
+        "                   Use --purge to also delete ~/.hermes/solomon/.\n",
         file=out,
     )
 
@@ -101,7 +110,57 @@ def _cmd_init() -> int:
     print()
     print("Next:")
     print("  Open Hermes and type /onboard to start the foundation interview.")
-    print("  Or type `solomon doctor` to confirm everything is wired right.")
+    print("  Or run `solomon doctor` to confirm everything is wired right.")
+    return 0
+
+
+# ---------------------------------------------------------------------------
+# register-crons / uninstall-crons
+# ---------------------------------------------------------------------------
+
+
+def _build_adapter():
+    """Construct a HermesAdapter without a plugin ctx for CLI use.
+
+    Methods that read disk or call Hermes APIs work fine; methods that
+    register tools/commands/hooks would fail (no ctx), but those aren't
+    called from the CLI cron-management path.
+    """
+    from .adapter import HermesAdapter
+    return HermesAdapter(ctx=None)
+
+
+def _cmd_register_crons() -> int:
+    from . import checkin, daily, weekly
+    a = _build_adapter()
+    try:
+        daily.register(a)
+        weekly_jobs = weekly.register(a)
+        checkin.register(a)
+    except Exception as e:  # noqa: BLE001
+        print(f"  ✗ Could not register cron jobs: {e}", file=sys.stderr)
+        print("    Hermes may not be installed, or its cron module may be unavailable.", file=sys.stderr)
+        return 1
+    print(f"  ✓ Daily reflection registered (02:00 nightly)")
+    print(f"  ✓ {len(weekly_jobs) - 1} weekly compression jobs registered "
+          "(Sunday 03:00–04:05, staggered)")
+    print(f"  ✓ Profile summary regeneration registered (Sunday 04:10)")
+    print(f"  ✓ Weekly check-in registered (Friday 15:00)")
+    print()
+    print("Total: 17 Hermes cron jobs.")
+    return 0
+
+
+def _cmd_uninstall_crons() -> int:
+    from . import checkin, daily, weekly
+    a = _build_adapter()
+    removed = 0
+    if daily.unregister(a):
+        removed += 1
+    removed += weekly.unregister(a)
+    if checkin.unregister(a):
+        removed += 1
+    print(f"  ✓ Removed {removed} Solomon cron jobs from Hermes.")
     return 0
 
 
@@ -131,21 +190,58 @@ def _cmd_logs(args: list[str]) -> int:
 # ---------------------------------------------------------------------------
 
 
-def _cmd_uninstall() -> int:
-    from pathlib import Path
+def _cmd_uninstall(purge: bool = False) -> int:
     import shutil
+    from .adapter import hermes_config_path, hermes_skills_dir_for
 
-    cfg = Path.home() / ".hermes" / "config.yaml"
-    backup = Path.home() / ".hermes" / "config.yaml.pre-solomon"
+    # 1. Remove Solomon's Hermes cron jobs.
+    print("Removing Solomon's cron jobs from Hermes...")
+    _cmd_uninstall_crons()
+
+    # 2. Restore Hermes config from the pre-Solomon backup, if one exists.
+    cfg = hermes_config_path()
+    backup = cfg.with_suffix(".yaml.pre-solomon")
     if backup.exists():
         shutil.copy2(backup, cfg)
         print(f"  ✓ Restored {cfg} from {backup}")
     else:
-        print("  (no backup found; Hermes config unchanged)")
-    print()
-    print("Solomon data at ~/.hermes/solomon/ is left in place.")
-    print("Delete that folder if you want a clean slate.")
-    print("Solomon skill files at ~/.hermes/skills/solomon/ are also left in place.")
+        # Fall back to disabling via the Hermes CLI.
+        a = _build_adapter()
+        if a.disable_plugin("solomon"):
+            print("  ✓ Disabled solomon via `hermes plugins disable`")
+        else:
+            print("  (no Hermes-config backup; couldn't auto-disable. "
+                  "Run `hermes plugins disable solomon` manually if needed.)")
+
+    # 3. Remove the skill files.
+    skill_dir = hermes_skills_dir_for("solomon")
+    if skill_dir.exists():
+        shutil.rmtree(skill_dir)
+        print(f"  ✓ Removed skill files at {skill_dir}")
+
+    # 4. Optionally purge the data folder.
+    from . import profile
+    home = profile.home()
+    if purge:
+        if home.exists():
+            try:
+                response = input(
+                    f"This will permanently delete everything Solomon knows about you at\n"
+                    f"  {home}\n"
+                    f"Type 'yes' to confirm: "
+                ).strip().lower()
+            except (EOFError, KeyboardInterrupt):
+                response = ""
+            if response == "yes":
+                shutil.rmtree(home)
+                print(f"  ✓ Deleted {home}")
+            else:
+                print(f"  (kept {home})")
+    else:
+        print()
+        print(f"Your Solomon data is at {home}.")
+        print("Delete that folder for a clean slate, or re-run with --purge "
+              "to do it for you (after a confirmation prompt).")
     return 0
 
 
