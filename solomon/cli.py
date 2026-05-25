@@ -41,24 +41,24 @@ def main(argv: Optional[list[str]] = None) -> int:
         return _cmd_uninstall_crons()
     if sub == "daily":
         from . import daily
-        result = daily.run_now()
+        result = daily.run_now(adapter=_build_adapter())
         print(result)
         return 0 if result.get("ok") else 1
     if sub == "weekly":
         from . import weekly
         which = rest[0] if rest else "all"
-        result = weekly.run_now(which=which)
+        result = weekly.run_now(which=which, adapter=_build_adapter())
         print(result)
         return 0 if result.get("ok") else 1
     if sub == "checkin":
         from . import checkin
-        result = checkin.run_now()
+        result = checkin.run_now(adapter=_build_adapter())
         print(result)
         return 0 if result.get("ok") else 1
     if sub == "ingest":
         # Same flow as /ingest in Hermes — fires the daily reflection cron.
         from . import daily
-        result = daily.run_now()
+        result = daily.run_now(adapter=_build_adapter())
         print(result)
         return 0 if result.get("ok") else 1
     if sub == "uninstall":

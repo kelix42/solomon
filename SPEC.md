@@ -1205,9 +1205,9 @@ arguments it accepts, what the handler does, and what the user sees.
 
 **User sees:** Something like "I have N items from this week to review, plus M pending actions you haven't gotten to. Want to start with the actions first or the captures?"
 
-### 8.3 — `/status`
+### 8.3 — `/solomon-status`
 
-**User types:** `/status` (no arguments)
+**User types:** `/solomon-status` (no arguments). Note: this command is named `/solomon-status` rather than `/status` to avoid colliding with Hermes's own built-in `/status` command. Hermes drops conflicting plugin commands at registration time.
 
 **Handler (no LLM call):**
 1. Read `profile.yaml`. Count sessions filled.

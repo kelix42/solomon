@@ -300,7 +300,9 @@ def cmd_solomon_on(raw_args: str) -> str:
 COMMANDS = {
     "onboard": (cmd_onboard, "Start or continue the foundation interview."),
     "mentor": (cmd_mentor, "Walk through pending items and probe gaps."),
-    "status": (cmd_status, "Show progress: foundation sessions, pending actions, inbox."),
+    # `/status` is a Hermes built-in command; we register under `/solomon-status`
+    # to avoid the collision (Hermes drops conflicting plugin commands).
+    "solomon-status": (cmd_status, "Show Solomon progress: foundation sessions, pending actions, inbox."),
     "private": (cmd_private, "Turn private mode on for this conversation."),
     "endprivate": (cmd_endprivate, "Turn private mode off."),
     "reflect": (cmd_reflect, "Run nightly reflection now."),

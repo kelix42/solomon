@@ -9,7 +9,8 @@ A running record of our file-by-file walkthrough of the system, plus everything 
 Walking the system top-down. Topics covered:
 
 - **Install flow** — 2026-05-25. How the installer works, what it changes in Hermes, why Solomon no longer auto-installs Hermes.
-- **v3 implementation** — 2026-05-25. Steps 1–9 of the v3 plan complete: adapter rewrite, plugin.yaml, session_state, hooks/slash/tools/inbound/cron rewrites, install.sh + CLI updates, SPEC.md + README rewrites. 201 tests passing. Only the real-Hermes smoke test (Step 10) and four open risks remain.
+- **v3 implementation** — 2026-05-25. Steps 1–9 of the v3 plan complete: adapter rewrite, plugin.yaml, session_state, hooks/slash/tools/inbound/cron rewrites, install.sh + CLI updates, SPEC.md + README rewrites. 201 tests passing.
+- **v3 real-Hermes smoke test** — 2026-05-25. Solomon installs cleanly into the live Hermes at `~/.hermes/hermes-agent/`. Hermes's PluginManager loads Solomon and reports: 19 tools, 3 hooks, 9 commands registered, 0 errors. The 17 cron jobs land in Hermes's cron list with correct schedules. `solomon doctor` reports all green (preferred_channel yellow as expected on fresh install). `solomon ingest` against the live install runs an LLM turn that loads the skill inline, enables the solomon toolset, and returns `[SILENT]` (correct convention). Four fixes landed during the smoke test — see "Decisions made" entries dated 2026-05-25 for the entry-point form, /status rename, gateway race, and CLI adapter wiring.
 
 ---
 
@@ -81,6 +82,26 @@ Each item: **what** / **source** / **state**.
 - **Tool dedupe in `propose_addition`.** [2026-05-25]
   - Same `(file, section, content, status=pending)` tuple returns the existing pending item ID rather than appending a duplicate. Makes the daily reflection cron safe to retry without producing duplicates if it dies mid-run.
   - Lives in: [solomon/tools.py](solomon/tools.py) `propose_addition`, [SPEC.md §7.4](SPEC.md).
+
+- **Entry-point form: module reference, not function reference.** [2026-05-25, found during Step 10 smoke test]
+  - `pyproject.toml`'s `[project.entry-points."hermes_agent.plugins"]` was `solomon = "solomon.plugin:register"`. Hermes calls `ep.load()` then `getattr(module, "register")`, so the entry-point value must resolve to the MODULE, not the function. Changed to `solomon = "solomon.plugin"`.
+  - Lives in: [pyproject.toml](pyproject.toml). Without this fix, Hermes loads the plugin then warns "no register() function" and skips it.
+
+- **Slash command `/status` collides with Hermes's built-in.** [2026-05-25, found during Step 10 smoke test]
+  - Hermes already registers `/status`; plugins that re-register it are dropped at registration time with a warning. Renamed to `/solomon-status` so the symmetry with `/solomon-off` / `/solomon-on` makes it discoverable.
+  - Lives in: [solomon/slash.py](solomon/slash.py) `COMMANDS`, [SPEC.md §8.3](SPEC.md), [README.md](README.md) commands table.
+
+- **Plugin shim at ~/.hermes/plugins/solomon/.** [2026-05-25, found during Step 10 smoke test]
+  - Hermes's `hermes plugins enable` CLI command only validates directory-based plugins, even though its PluginManager loads entry-point plugins. install.sh now writes a tiny 2-file shim directory (plugin.yaml + an __init__.py that imports `register` from the pip-installed package) so the CLI enable step succeeds.
+  - Lives in: [install.sh](install.sh) Section 7. Solomon is still primarily discovered via the entry-point; the shim is purely to satisfy the CLI gate.
+
+- **Re-confirm plugins.enabled after register-crons.** [2026-05-25, found during Step 10 smoke test]
+  - When a Hermes gateway is running concurrently with `install.sh`, it may rewrite `config.yaml` from its in-memory snapshot mid-install — overwriting our `plugins.enabled` change. install.sh now re-issues `hermes plugins enable solomon` after cron registration to make the final on-disk state authoritative. Also detects a running gateway PID and prints a "restart for Solomon to be picked up" warning at the end.
+  - Lives in: [install.sh](install.sh) Section 9.
+
+- **CLI `solomon ingest`/`daily`/`weekly`/`checkin` need an adapter.** [2026-05-25, found during Step 10 smoke test]
+  - The CLI runs outside a Hermes plugin context, so `tools._adapter` is None at import time and `daily.run_now()` returns `{ok: False, reason: 'no adapter'}`. Fixed by having cli.py construct a ctx-less `HermesAdapter` via `_build_adapter()` and pass it explicitly to `run_now(adapter=...)` in every cron-firing subcommand.
+  - Lives in: [solomon/cli.py](solomon/cli.py).
 
 ---
 

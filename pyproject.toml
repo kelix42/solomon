@@ -25,7 +25,10 @@ dev = [
 solomon = "solomon.cli:main"
 
 [project.entry-points."hermes_agent.plugins"]
-solomon = "solomon.plugin:register"
+# Point to the module, not the function. Hermes calls ep.load() then
+# getattr(module, "register"), so the entry-point value must resolve
+# to the solomon.plugin module itself.
+solomon = "solomon.plugin"
 
 [project.urls]
 Homepage = "https://github.com/kelix42/solomon"

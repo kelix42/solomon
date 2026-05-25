@@ -194,7 +194,7 @@ def test_register_all_uses_hermes_signature(solomon_home: Path):
 
     slash.register_all(FakeAdapter())
     names = {c[0] for c in calls}
-    assert names == {"onboard", "mentor", "status", "private", "endprivate",
+    assert names == {"onboard", "mentor", "solomon-status", "private", "endprivate",
                       "reflect", "ingest", "solomon-off", "solomon-on"}
     # Every handler accepts a raw string and returns a string (or None).
     for _, h in calls:

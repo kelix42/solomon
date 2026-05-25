@@ -180,7 +180,11 @@ SOLOMON_REF="${SOLOMON_REF:-main}"
 
 solomon_installed() {
     [ "$DRY_RUN" -eq 1 ] && return 1
-    "$HERMES_PY" -c 'import solomon' >/dev/null 2>&1
+    # Use pip show, not `python -c 'import solomon'`. The latter is a false
+    # positive when this script runs from the solomon checkout — cwd ends up
+    # on sys.path, so the local package imports even when it was never pip
+    # installed into the Hermes venv.
+    "$HERMES_PY" -m pip show solomon-brain >/dev/null 2>&1
 }
 
 if solomon_installed; then
@@ -261,15 +265,41 @@ fi
 # ---- 7. Register the plugin via Hermes's own CLI ----------------------------
 #
 # We back up ~/.hermes/config.yaml once (so `solomon uninstall` can restore
-# it cleanly), then use `hermes plugins enable solomon` — the official path.
-# This avoids hand-editing the YAML and keeps Hermes's own state coherent.
+# it cleanly), then create a tiny shim directory at ~/.hermes/plugins/solomon/
+# that gives Hermes a directory-based plugin presence (its `plugins enable`
+# CLI only validates directory plugins, not entry-point ones). The shim's
+# __init__.py just imports register() from the pip-installed solomon package.
+# Either discovery path (entry-point or directory) loads the same code.
 
 HERMES_CFG="$HOME/.hermes/config.yaml"
 if [ -f "$HERMES_CFG" ] && [ ! -f "$HERMES_CFG.pre-solomon" ]; then
     [ "$DRY_RUN" -eq 0 ] && cp "$HERMES_CFG" "$HERMES_CFG.pre-solomon"
 fi
 
-run "\"$HERMES_PY\" -m hermes_cli plugins enable solomon"
+PLUGIN_SHIM="$HOME/.hermes/plugins/solomon"
+if [ "$DRY_RUN" -eq 0 ]; then
+    mkdir -p "$PLUGIN_SHIM"
+    # plugin.yaml ships inside the package — copy from the pip-installed location
+    # so the shim matches the installed version.
+    PLUGIN_YAML="$("$HERMES_PY" -c "import solomon, os; print(os.path.join(os.path.dirname(solomon.__file__), 'plugin.yaml'))" 2>/dev/null)"
+    if [ -n "$PLUGIN_YAML" ] && [ -f "$PLUGIN_YAML" ]; then
+        cp "$PLUGIN_YAML" "$PLUGIN_SHIM/plugin.yaml"
+    fi
+    cat > "$PLUGIN_SHIM/__init__.py" <<'PYEOF'
+"""Hermes plugin shim for Solomon.
+
+Hermes discovers plugins by directory. The real code lives in the
+pip-installed `solomon` package; this shim just re-exports `register`
+so Hermes's directory-based discovery finds it.
+"""
+from solomon.plugin import register  # noqa: F401
+PYEOF
+    ok "Plugin shim installed at $PLUGIN_SHIM"
+else
+    printf "  [dry-run] write %s/{plugin.yaml,__init__.py}\n" "$PLUGIN_SHIM"
+fi
+
+run "\"$HERMES_PY\" -m hermes_cli.main plugins enable solomon"
 
 # ---- 8. Register cron jobs with Hermes (NOT system crontab) ------------------
 #
@@ -280,6 +310,27 @@ run "\"$HERMES_PY\" -m hermes_cli plugins enable solomon"
 # auth/credentials/logging.
 
 run "\"$HERMES_PY\" -m solomon.cli register-crons"
+
+# ---- 9. Re-confirm plugins.enabled --------------------------------------------
+#
+# If a Hermes gateway is running concurrently with this install, it may
+# rewrite config.yaml from its in-memory snapshot mid-install. Re-issuing
+# `plugins enable solomon` after cron registration ensures the final
+# on-disk state has Solomon enabled. The command is idempotent.
+
+run "\"$HERMES_PY\" -m hermes_cli.main plugins enable solomon"
+
+# Detect a running gateway and tell the user it needs to restart for
+# Solomon to be picked up. The cron jobs we registered DO get picked
+# up automatically (Hermes polls the cron DB every 60s), but the
+# plugin contract (tools/hooks/commands) only loads at session start.
+if [ "$DRY_RUN" -eq 0 ] && [ -f "$HOME/.hermes/gateway.pid" ]; then
+    GW_PID="$(grep -o '"pid": *[0-9]*' "$HOME/.hermes/gateway.pid" 2>/dev/null | grep -o '[0-9]*')"
+    if [ -n "$GW_PID" ] && ps -p "$GW_PID" >/dev/null 2>&1; then
+        warn "Hermes gateway is running (pid $GW_PID). Restart it for Solomon"
+        warn "to be picked up:  hermes gateway restart"
+    fi
+fi
 
 # ---- Done -------------------------------------------------------------------
 

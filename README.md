@@ -75,7 +75,7 @@ Useful commands:
 |---|---|
 | `/onboard` | Continue the foundation interviews |
 | `/mentor` | Walk through pending items with Solomon (do this once a week) |
-| `/status` | Show what's done, what's pending |
+| `/solomon-status` | Show what's done, what's pending (named to avoid Hermes's built-in `/status`) |
 | `/private` / `/endprivate` | Turn learning off / on for the current conversation |
 | `/ingest` | Process documents you dropped in `~/.hermes/solomon/inbox/` |
 | `/reflect` | Run the nightly reflection now |
