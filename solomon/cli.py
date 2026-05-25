@@ -220,7 +220,14 @@ def _cmd_uninstall(purge: bool = False) -> int:
         shutil.rmtree(skill_dir)
         print(f"  ✓ Removed skill files at {skill_dir}")
 
-    # 4. Optionally purge the data folder.
+    # 4. Remove the plugin shim directory at ~/.hermes/plugins/solomon/.
+    from pathlib import Path
+    plugin_shim = Path.home() / ".hermes" / "plugins" / "solomon"
+    if plugin_shim.exists():
+        shutil.rmtree(plugin_shim)
+        print(f"  ✓ Removed plugin shim at {plugin_shim}")
+
+    # 5. Optionally purge the data folder.
     from . import profile
     home = profile.home()
     if purge:
