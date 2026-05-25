@@ -1,9 +1,0 @@
-# 01-belief-system.yaml — derived summary; canonical store is db/schemas/captured_items.sql.
-# Topics: money / people / risk / debt / competition / growth / contrarian / corrected beliefs
-# Filled by solomon-onboarding-01-belief-system or by intake.md -> solomon-extraction.
-# Sleep-Cycle Job 12 (yaml-reconcile) catches drift; DB-wins per §1.
-
-last_updated: null
-
-# (placeholder — filled at end-of-onboarding from captured_items rows where domain matches this YAML)
-raw_notes: |

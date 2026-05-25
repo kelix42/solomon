@@ -1,1 +1,0 @@
-"""solomon.audit_gate"""
