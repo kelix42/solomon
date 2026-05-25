@@ -56,10 +56,11 @@ def main(argv: Optional[list[str]] = None) -> int:
         print(result)
         return 0 if result.get("ok") else 1
     if sub == "ingest":
-        from . import ingest
-        result = ingest.process_all()
+        # Same flow as /ingest in Hermes — fires the daily reflection cron.
+        from . import daily
+        result = daily.run_now()
         print(result)
-        return 0
+        return 0 if result.get("ok") else 1
     if sub == "uninstall":
         purge = "--purge" in rest
         return _cmd_uninstall(purge=purge)

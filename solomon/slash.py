@@ -246,19 +246,26 @@ def cmd_reflect(raw_args: str) -> str:
 
 
 def cmd_ingest(raw_args: str) -> str:
+    """Process the inbox now.
+
+    Under the v3 design, ingestion is one of four steps the daily-reflection
+    cron does. `/ingest` is a manual override that fires the same cron right
+    now — same prompt, same tools, just no waiting until 02:00.
+    """
     profile.init_solomon_home()
     inbox = profile.home() / "inbox"
     if not inbox.exists() or not any(inbox.iterdir()):
         return ("Inbox is empty. Drop files into ~/.hermes/solomon/inbox/ "
                 "first, then run /ingest again.")
-    from . import ingest
-    summary = ingest.process_all()
-    lines = ["Ingest complete."]
-    lines.append(f"  Files processed: {summary['ok']}")
-    if summary.get("failed"):
-        lines.append(f"  Files failed: {summary['failed']} (see archive/failed/)")
-    lines.append(f"  Proposals added: {summary.get('proposals', 0)}")
-    return "\n".join(lines)
+    from . import daily
+    result = daily.run_now()
+    if not result.get("ok"):
+        return ("Couldn't run ingestion right now. Cause: "
+                f"{result.get('reason') or result.get('error') or 'unknown'}.")
+    final = (result.get("final_response") or "").strip()
+    if final == "[SILENT]":
+        return "Ingest ran but nothing new to capture."
+    return f"Ingest complete.\n\n{final}" if final else "Ingest complete."
 
 
 # ---------------------------------------------------------------------------
