@@ -195,12 +195,15 @@ def test_register_all_calls_adapter(solomon_home: Path):
 
     tools.register_all(FakeAdapter())
     names = [c[0] for c in calls]
-    assert set(names) == {
+    # The v3 build added cron-side tools to the original 9. We assert the
+    # original 9 are still all present; the full set lives in test_tools_step4.
+    base_nine = {
         "read_profile", "read_playbook", "read_queue",
         "propose_addition", "flag_contradiction",
         "propose_action", "note_handled",
         "apply_queue_decision", "mark_session_complete",
     }
+    assert base_nine.issubset(set(names))
     # Handlers should accept a dict.
     rp_handler = next(c[2] for c in calls if c[0] == "read_profile")
     result = rp_handler({"section": "industry"})

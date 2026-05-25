@@ -14,10 +14,15 @@ The tools split into:
 from __future__ import annotations
 
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
 
 from . import logs, profile
+
+# Set by `register_all(adapter)` so tools that need adapter access (the
+# cron-side ones that send messages or read session history) can reach it
+# without threading it through every handler signature.
+_adapter: Any = None
 
 # ---------------------------------------------------------------------------
 # Valid enum values
@@ -89,6 +94,19 @@ def propose_addition(file: str, section: str, content: str, reason: str,
         raise ValueError(f"unknown file {file!r}; valid: {profile.PLAYBOOKS}")
     if not section or not content:
         raise ValueError("section and content are required")
+    # Dedupe: if an identical (file, section, content) is already pending,
+    # return the existing id instead of creating a duplicate queue item.
+    # Cheap defense against the same conversation getting reflected on twice
+    # (e.g., daily cron processes a turn that was also part of the inbound flow).
+    for existing in profile.read_queue("review", status="pending", limit=10_000):
+        if (existing.get("kind") == "addition"
+                and existing.get("file") == file
+                and existing.get("section") == section
+                and existing.get("content") == content):
+            logs.log("propose_addition_deduped",
+                     item_id=existing.get("id"),
+                     file=file, section=section)
+            return existing["id"]
     item = {
         "kind": "addition",
         "file": file,
@@ -296,6 +314,309 @@ def apply_queue_decision(item_id: str, decision: str,
     return True
 
 
+# ---------------------------------------------------------------------------
+# Compression — used by the 14 weekly playbook crons + the summary cron
+# ---------------------------------------------------------------------------
+
+
+def propose_compression(file: str, content: str, summary: str,
+                         diff: Optional[str] = None) -> str:
+    """Queue a compressed rewrite of a playbook for owner review.
+
+    Called by the LLM during a weekly compression cron turn. The owner
+    approves/edits/rejects in /mentor.
+    """
+    if file not in profile.PLAYBOOKS:
+        raise ValueError(f"unknown file {file!r}; valid: {profile.PLAYBOOKS}")
+    if not content or not summary:
+        raise ValueError("content and summary are required")
+    item = {
+        "kind": "compression",
+        "file": file,
+        "section": None,
+        "content": content,
+        "reason": summary,
+        "diff": diff or "",
+    }
+    iid = profile.append_review_item(item)
+    logs.log("propose_compression", item_id=iid, file=file)
+    return iid
+
+
+def apply_profile_summary(text: str) -> bool:
+    """Write a new profile.yaml.summary.text immediately (no owner review).
+
+    The summary is a derived field — regenerable on the next weekly run.
+    Owner review would be friction without value here. Used by the
+    Sunday-4:10 summary cron.
+    """
+    if not isinstance(text, str) or not text.strip():
+        raise ValueError("summary text is required")
+    profile.update_profile_summary(text)
+    logs.log("summary_regenerated")
+    return True
+
+
+# ---------------------------------------------------------------------------
+# Cron-side I/O — the daily-cron LLM uses these to walk the inbox + archive
+# ---------------------------------------------------------------------------
+
+
+def list_inbox() -> list[str]:
+    """Return the names of files currently in the inbox."""
+    inbox = profile.home() / "inbox"
+    if not inbox.exists():
+        return []
+    return sorted(p.name for p in inbox.iterdir() if p.is_file())
+
+
+def read_inbox_file(name: str, max_chars: int = 60_000) -> str:
+    """Return the text content of one inbox file. Caps at max_chars so a
+    huge document doesn't blow the LLM's context — the LLM can decide what
+    to do with truncation."""
+    if "/" in name or name.startswith(".."):
+        raise ValueError("name must be a bare filename, not a path")
+    path = profile.home() / "inbox" / name
+    if not path.exists():
+        raise FileNotFoundError(f"inbox file not found: {name}")
+    text = path.read_text(encoding="utf-8", errors="replace")
+    if len(text) > max_chars:
+        return text[:max_chars] + f"\n\n[TRUNCATED — file is {len(text)} chars; first {max_chars} shown]"
+    return text
+
+
+def archive_file(name: str, status: str = "processed",
+                  error: Optional[str] = None) -> str:
+    """Move an inbox file into archive/processed/YYYY-MM-DD/ or
+    archive/failed/YYYY-MM-DD/. Idempotent at the filesystem level
+    (if the source is already gone, returns the would-be path)."""
+    if status not in ("processed", "failed"):
+        raise ValueError("status must be 'processed' or 'failed'")
+    if "/" in name or name.startswith(".."):
+        raise ValueError("name must be a bare filename, not a path")
+    src = profile.home() / "inbox" / name
+    today = datetime.now(timezone.utc).date().isoformat()
+    dest_dir = profile.home() / "archive" / status / today
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    dest = dest_dir / name
+    if not src.exists():
+        # Already archived. Idempotent.
+        return str(dest)
+    if dest.exists():
+        # Avoid clobber.
+        stem, suffix = dest.stem, dest.suffix
+        i = 1
+        while (dest_dir / f"{stem}.{i}{suffix}").exists():
+            i += 1
+        dest = dest_dir / f"{stem}.{i}{suffix}"
+    import shutil
+    shutil.move(str(src), str(dest))
+    if error and status == "failed":
+        (dest.parent / f"{dest.name}.error.txt").write_text(error, encoding="utf-8")
+    logs.log("archive_file", file=name,
+             context={"status": status, "dest": str(dest)})
+    return str(dest)
+
+
+# ---------------------------------------------------------------------------
+# Conversation history — for the daily reflection cron
+# ---------------------------------------------------------------------------
+
+
+def read_conversations(since_hours: int = 24, limit: int = 50,
+                        exclude_private: bool = True) -> list[dict]:
+    """Return recent Hermes conversations.
+
+    `exclude_private=True` (default) filters out session IDs the owner
+    has marked private via /private.
+    """
+    if _adapter is None:
+        logs.log("read_conversations_no_adapter", level="WARN")
+        return []
+    from .session_state import list_private_session_ids
+    excluded = list_private_session_ids() if exclude_private else None
+    since = datetime.now(timezone.utc) - timedelta(hours=since_hours)
+    return _adapter.read_conversations(
+        since=since, limit=limit, exclude_session_ids=excluded,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Nudge cadence + send_nudge
+# ---------------------------------------------------------------------------
+
+
+# Minimum hours between nudges, by urgency. The first nudge is allowed any
+# time after notification (the daily cron runs once a day; first-nudge timing
+# is implicitly bounded by the cron schedule).
+NUDGE_MIN_INTERVAL_HOURS = {"high": 1, "medium": 4, "low": 12}
+NUDGE_MAX = 3
+
+
+def list_pending_actions_due_for_nudge() -> list[dict]:
+    """Return pending action items that are due for a nudge right now.
+
+    Filter rules:
+    - status == "pending"
+    - owner_notified_at must be set (no nudges for un-notified items)
+    - nudge_count < NUDGE_MAX
+    - now > last_nudge_at + urgency-specific minimum interval (or never nudged)
+    """
+    items = profile.read_queue("actions", "pending", limit=10_000)
+    now = datetime.now(timezone.utc)
+    due: list[dict] = []
+    for it in items:
+        if not it.get("owner_notified_at"):
+            continue
+        if it.get("nudge_count", 0) >= NUDGE_MAX:
+            continue
+        last = it.get("last_nudge_at") or it.get("owner_notified_at")
+        try:
+            last_dt = datetime.fromisoformat(last.replace("Z", "+00:00"))
+        except (ValueError, AttributeError):
+            continue
+        urgency = it.get("urgency", "medium")
+        min_hours = NUDGE_MIN_INTERVAL_HOURS.get(urgency,
+                                                 NUDGE_MIN_INTERVAL_HOURS["medium"])
+        if (now - last_dt).total_seconds() >= min_hours * 3600:
+            due.append(it)
+    return due
+
+
+def send_nudge(item_id: str, text: str) -> bool:
+    """Send a nudge to the owner about a pending action.
+
+    Enforces the cadence rule — if the item isn't actually due (per
+    `list_pending_actions_due_for_nudge`'s criteria), this is a no-op and
+    returns False. This is the cadence safeguard against the LLM
+    spamming the owner.
+
+    On success: increments nudge_count, sets last_nudge_at. If
+    nudge_count hits NUDGE_MAX after the increment, marks the item stale.
+    """
+    item = profile.find_queue_item("actions", item_id)
+    if not item:
+        raise ValueError(f"action item {item_id!r} not found")
+    if item.get("status") != "pending":
+        return False
+    # Cadence check — match list_pending_actions_due_for_nudge.
+    if item.get("nudge_count", 0) >= NUDGE_MAX:
+        return False
+    last = item.get("last_nudge_at") or item.get("owner_notified_at")
+    if last:
+        try:
+            last_dt = datetime.fromisoformat(last.replace("Z", "+00:00"))
+            urgency = item.get("urgency", "medium")
+            min_hours = NUDGE_MIN_INTERVAL_HOURS.get(urgency,
+                                                     NUDGE_MIN_INTERVAL_HOURS["medium"])
+            if (datetime.now(timezone.utc) - last_dt).total_seconds() < min_hours * 3600:
+                logs.log("send_nudge_too_soon", item_id=item_id,
+                         context={"min_hours": min_hours, "urgency": urgency})
+                return False
+        except (ValueError, AttributeError):
+            pass
+    # Send via the adapter.
+    if _adapter is None:
+        logs.log("send_nudge_no_adapter", level="WARN", item_id=item_id)
+        return False
+    sent_ok = _adapter.send_to_owner(text)
+    if not sent_ok:
+        # Queue for retry. We still don't bump the counter on send failure
+        # — we want the cron to try again later, not skip the nudge.
+        _queue_pending_message(text)
+        logs.log("send_nudge_queued", item_id=item_id)
+        return False
+    new_count = item.get("nudge_count", 0) + 1
+    updates = {
+        "nudge_count": new_count,
+        "last_nudge_at": datetime.now(timezone.utc).isoformat(),
+    }
+    if new_count >= NUDGE_MAX:
+        updates["status"] = "stale"
+        logs.log("action_stale", item_id=item_id)
+    profile.update_queue_item("actions", item_id, updates)
+    logs.log("nudge_sent", item_id=item_id, nudge_count=new_count)
+    return True
+
+
+# ---------------------------------------------------------------------------
+# Owner messaging — for the LLM to compose proactive notes during a cron turn
+# ---------------------------------------------------------------------------
+
+
+def send_to_owner(text: str, target: Optional[str] = None) -> bool:
+    """Push a message to the owner via the configured gateway.
+
+    Falls back to pending_messages.jsonl on failure. The next daily cron
+    retries via retry_pending_messages.
+    """
+    if not text or not text.strip():
+        raise ValueError("text is required")
+    if _adapter is None:
+        _queue_pending_message(text, target)
+        return False
+    ok = _adapter.send_to_owner(text, target=target)
+    if not ok:
+        _queue_pending_message(text, target)
+    return ok
+
+
+def retry_pending_messages() -> int:
+    """Re-dispatch any messages in pending_messages.jsonl. Returns count sent."""
+    if _adapter is None:
+        return 0
+    path = profile.home() / "pending_messages.jsonl"
+    if not path.exists():
+        return 0
+    import json
+    entries: list[dict] = []
+    for line in path.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            entries.append(json.loads(line))
+        except json.JSONDecodeError:
+            continue
+    if not entries:
+        path.unlink(missing_ok=True)
+        return 0
+    remaining: list[dict] = []
+    sent = 0
+    for entry in entries:
+        ok = _adapter.send_to_owner(entry.get("text", ""),
+                                       target=entry.get("target"))
+        if ok:
+            sent += 1
+            logs.log("pending_message_sent",
+                     context={"target": entry.get("target")})
+        else:
+            remaining.append(entry)
+    if remaining:
+        path.write_text("\n".join(json.dumps(e, ensure_ascii=False) for e in remaining) + "\n",
+                         encoding="utf-8")
+    else:
+        path.unlink(missing_ok=True)
+    return sent
+
+
+def _queue_pending_message(text: str, target: Optional[str] = None) -> None:
+    """Append a failed-to-send message to pending_messages.jsonl."""
+    import json
+    path = profile.home() / "pending_messages.jsonl"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    entry = {
+        "ts": datetime.now(timezone.utc).isoformat(),
+        "text": text,
+        "target": target,
+    }
+    existing = path.read_text(encoding="utf-8") if path.exists() else ""
+    if existing and not existing.endswith("\n"):
+        existing += "\n"
+    path.write_text(existing + json.dumps(entry, ensure_ascii=False) + "\n",
+                     encoding="utf-8")
+
+
 def mark_session_complete(session_n: int, summary: dict) -> bool:
     profile.write_session_summary(session_n, summary)
     logs.log("mark_session_complete", context={"session_n": session_n})
@@ -407,23 +728,101 @@ _SCHEMAS: dict[str, dict] = {
         },
         "required": ["session_n", "summary"],
     },
+    "propose_compression": {
+        "type": "object",
+        "properties": {
+            "file": {"type": "string", "enum": list(profile.PLAYBOOKS)},
+            "content": {"type": "string"},
+            "summary": {"type": "string"},
+            "diff": {"type": "string"},
+        },
+        "required": ["file", "content", "summary"],
+    },
+    "apply_profile_summary": {
+        "type": "object",
+        "properties": {"text": {"type": "string"}},
+        "required": ["text"],
+    },
+    "list_inbox": {"type": "object", "properties": {}},
+    "read_inbox_file": {
+        "type": "object",
+        "properties": {"name": {"type": "string"},
+                        "max_chars": {"type": "integer", "default": 60000}},
+        "required": ["name"],
+    },
+    "archive_file": {
+        "type": "object",
+        "properties": {
+            "name": {"type": "string"},
+            "status": {"type": "string", "enum": ["processed", "failed"]},
+            "error": {"type": "string"},
+        },
+        "required": ["name"],
+    },
+    "read_conversations": {
+        "type": "object",
+        "properties": {
+            "since_hours": {"type": "integer", "default": 24},
+            "limit": {"type": "integer", "default": 50},
+            "exclude_private": {"type": "boolean", "default": True},
+        },
+    },
+    "list_pending_actions_due_for_nudge": {
+        "type": "object", "properties": {},
+    },
+    "send_nudge": {
+        "type": "object",
+        "properties": {
+            "item_id": {"type": "string"},
+            "text": {"type": "string"},
+        },
+        "required": ["item_id", "text"],
+    },
+    "send_to_owner": {
+        "type": "object",
+        "properties": {
+            "text": {"type": "string"},
+            "target": {"type": "string",
+                        "description": "platform:channel-id (omit to use the owner's default channel)"},
+        },
+        "required": ["text"],
+    },
+    "retry_pending_messages": {"type": "object", "properties": {}},
 }
 
 _DESCRIPTIONS = {
     "read_profile": "Read one section of the owner's foundation profile.",
-    "read_playbook": "Read one of the fourteen playbooks (vocabulary, customers, vendors, operations, sales, marketing, finance, people, product, support, legal, technology, strategy, procurement).",
+    "read_playbook": "Read one of the fourteen playbooks.",
     "read_queue": "Read pending items from the review queue or the action queue.",
-    "propose_addition": "Propose adding a new rule or fact to a playbook. The owner will review in /mentor.",
+    "propose_addition": "Propose adding a new rule or fact to a playbook. The owner reviews in /mentor.",
     "flag_contradiction": "Flag a contradiction between two captured facts for owner resolution.",
     "propose_action": "After the two-pass thinking on an inbound external message, propose an action for owner approval.",
-    "note_handled": "Record that an inbound was considered but no action is needed (newsletter, OOO reply, etc.).",
-    "apply_queue_decision": "Apply the owner's approve/edit/reject decision to a queue item. Used during /mentor.",
-    "mark_session_complete": "Finalize one of the seven onboarding sessions and write the summary into profile.yaml.",
+    "note_handled": "Record that an inbound was considered but no action is needed.",
+    "apply_queue_decision": "Apply the owner's approve/edit/reject decision to a queue item.",
+    "mark_session_complete": "Finalize one of the seven onboarding sessions.",
+    "propose_compression": "Queue a compressed rewrite of a playbook for owner review. Used by the weekly compression crons.",
+    "apply_profile_summary": "Write a new profile.yaml.summary.text immediately (no review). Used by the weekly summary cron.",
+    "list_inbox": "List file names currently in the inbox.",
+    "read_inbox_file": "Read the text content of one inbox file.",
+    "archive_file": "Move an inbox file to archive/processed/ or archive/failed/.",
+    "read_conversations": "Read recent Hermes conversations (excludes private sessions by default). Used by the daily reflection cron.",
+    "list_pending_actions_due_for_nudge": "Return pending action items whose nudge cadence is up.",
+    "send_nudge": "Send a nudge message about a pending action. Enforces the urgency-based cadence — no-op if too soon.",
+    "send_to_owner": "Push a message to the owner via the configured gateway. Used by the proactive flow.",
+    "retry_pending_messages": "Re-dispatch any messages that failed to send earlier.",
 }
 
 
 def register_all(adapter) -> None:  # noqa: ANN001
-    """Register every tool with the given Hermes adapter."""
+    """Register every tool with the given Hermes adapter.
+
+    Also stores the adapter at module scope so cron-side tools (which the
+    LLM calls during a Hermes cron turn) can reach Hermes APIs that aren't
+    available through their args.
+    """
+    global _adapter
+    _adapter = adapter
+
     funcs = {
         "read_profile": read_profile,
         "read_playbook": read_playbook,
@@ -434,6 +833,16 @@ def register_all(adapter) -> None:  # noqa: ANN001
         "note_handled": note_handled,
         "apply_queue_decision": apply_queue_decision,
         "mark_session_complete": mark_session_complete,
+        "propose_compression": propose_compression,
+        "apply_profile_summary": apply_profile_summary,
+        "list_inbox": list_inbox,
+        "read_inbox_file": read_inbox_file,
+        "archive_file": archive_file,
+        "read_conversations": read_conversations,
+        "list_pending_actions_due_for_nudge": list_pending_actions_due_for_nudge,
+        "send_nudge": send_nudge,
+        "send_to_owner": send_to_owner,
+        "retry_pending_messages": retry_pending_messages,
     }
     for name, fn in funcs.items():
         adapter.register_tool(
