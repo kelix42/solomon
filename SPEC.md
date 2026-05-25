@@ -2,7 +2,9 @@
 
 This is the source of truth for what Solomon is and how it is built. Everything in this document is binding for the implementation. Nothing here is a placeholder or a scaffold — every section is concrete enough that the build can proceed step by step without further design decisions.
 
-Last revised: 2026-05-24.
+Last revised: 2026-05-25 (v3 implementation corrections).
+
+**Status note (2026-05-25):** Implementation is in. Verified against a live Hermes install at `~/.hermes/hermes-agent/`. The spec below has been updated to match the real Hermes API contracts (hook signatures, tool registration, cron registration, send/read APIs) discovered during the v3 verification pass.
 
 ---
 
@@ -14,10 +16,10 @@ Last revised: 2026-05-24.
 4. [Files on Disk](#4-files-on-disk)
 5. [Data Schemas](#5-data-schemas)
 6. [The Four Skills](#6-the-four-skills)
-7. [The Nine Tools](#7-the-nine-tools)
-8. [The Eight Slash Commands](#8-the-eight-slash-commands)
+7. [The Nineteen Tools](#7-the-nineteen-tools)
+8. [The Nine Slash Commands](#8-the-nine-slash-commands)
 9. [The Proactive Inbound Flow](#9-the-proactive-inbound-flow)
-10. [The Three Cron Jobs](#10-the-three-cron-jobs)
+10. [The Seventeen Cron Jobs](#10-the-seventeen-cron-jobs)
 11. [The Seven Onboarding Sessions](#11-the-seven-onboarding-sessions)
 12. [The Loading Strategy](#12-the-loading-strategy)
 13. [The Cross-Reference Rule](#13-the-cross-reference-rule)
@@ -88,10 +90,9 @@ The install script performs these steps in order, printing one line per step:
 5. **Wrap the CLI.** Create a `solomon` wrapper script next to the existing Hermes binary on PATH so `solomon doctor`, `solomon logs`, etc. work.
 6. **Scaffold the home folder.** Create `~/.hermes/solomon/` with empty template files for `profile.yaml`, `vocabulary.md`, and the thirteen function-playbook files (fourteen markdown files in total counting vocabulary). Create empty `inbox/`, `archive/`, and `logs/` subfolders. Initialize a git repo in the folder. Make the first commit ("Solomon initialized").
 7. **Install the skills.** Copy the four skill files (`solomon-default.md`, `solomon-interview.md`, `solomon-ingest.md`, `solomon-compress.md`) into `~/.hermes/skills/solomon/`.
-8. **Register Solomon with Hermes.** Add `solomon` to the `plugins.enabled` list in `~/.hermes/config.yaml`. Back up the original config to `config.yaml.pre-solomon`.
-9. **Install cron jobs.** Add three entries to the user's crontab: nightly reflection at 2:00 a.m., weekly compression at 3:00 a.m. Sunday, weekly check-in at 3:00 p.m. Friday. (Skipped with a warning if `crontab` is not on PATH — e.g., on systems that use launchd or no scheduler.)
+8. **Register Solomon with Hermes.** Back up `~/.hermes/config.yaml` to `config.yaml.pre-solomon` (so uninstall can restore cleanly), then call `hermes plugins enable solomon` — the canonical Hermes-side path, not a hand-edit of the YAML. The CLI handles `plugins.enabled` book-keeping.
+9. **Register cron jobs with Hermes.** Run `solomon register-crons`, which calls `cron.jobs.create_job` 17 times: 1 daily reflection (02:00), 14 weekly playbook compressions (staggered 5 min apart starting Sunday 03:00), 1 weekly profile-summary regeneration (Sunday 04:10), 1 weekly check-in (Friday 15:00). Hermes's own scheduler fires them every 60 seconds — no system crontab edits, no Windows-incompatibility for the scheduling layer.
 10. **Activate Solomon.** No sentinel file means Solomon is on.
-11. **Restart Hermes** if running.
 
 Final output to the user:
 
@@ -903,16 +904,24 @@ The summary field is shown to the owner when they review the compression. It sho
 
 ---
 
-## 7. The Nine Tools
+## 7. The Nineteen Tools
 
-Each tool is a Python function registered with Hermes through `ctx.register_tool`. The LLM calls them. Owners never call them directly. Every write goes through `profile.py` so the git auto-commit and file-locking behavior is consistent.
+Each tool is a Python function registered with Hermes through the real
+`register_tool(name, toolset, schema, handler, ...)` API. All Solomon tools
+live in a single toolset named `solomon` (constant `SOLOMON_TOOLSET` in
+`adapter.py`). The LLM calls them. Owners never call them directly. Every
+write goes through `profile.py` so the git auto-commit and file-locking
+behavior is consistent.
 
-The nine tools split into four groups:
+The nineteen tools split into seven groups:
 
-- **Read tools** (no side effects): `read_profile`, `read_playbook`, `read_queue`
+- **Read tools** (no side effects): `read_profile`, `read_playbook`, `read_queue`, `read_conversations`
 - **Propose tools — knowledge** (queue writes only): `propose_addition`, `flag_contradiction`
 - **Propose tools — action** (action-queue writes only): `propose_action`, `note_handled`
-- **Apply tools** (file writes, owner-approved): `apply_queue_decision`, `mark_session_complete`
+- **Propose tools — compression** (queue writes only): `propose_compression`
+- **Apply tools** (file writes, owner-approved): `apply_queue_decision`, `apply_profile_summary`, `mark_session_complete`
+- **Inbox I/O tools** (read, archive): `list_inbox`, `read_inbox_file`, `archive_file`
+- **Outbound + retry tools** (cron-side): `list_pending_actions_due_for_nudge`, `send_nudge`, `send_to_owner`, `retry_pending_messages`
 
 ### PII redaction at write time
 
@@ -1072,13 +1081,103 @@ The tool:
 
 Raises an error if validation fails. The error message tells the LLM which fields are missing or invalid.
 
+### 7.10 — `read_conversations(since_hours: int = 24, limit: int = 50, exclude_private: bool = True) -> list[dict]`
+
+Returns recent Hermes conversations as a list of dicts. Each entry contains `session_id`, `started_at`, `last_message_at`, `platform`, and `messages` (a list of `{role, content, ts}`).
+
+Internally calls `HermesAdapter.read_conversations`, which wraps `hermes_state.SessionDB.list_sessions_rich` and `get_messages_as_conversation`. When `exclude_private=True` (default), session IDs from `private_sessions.jsonl` are filtered out.
+
+Used by the daily reflection cron to find learning material from the last 24 hours.
+
+### 7.11 — `propose_compression(file: str, content: str, summary: str, diff: str | None = None) -> str`
+
+Queues a compressed rewrite of a playbook for owner review. Called by the weekly compression crons. Arguments:
+
+- `file`: one of the fourteen playbook names.
+- `content`: the full rewritten playbook body.
+- `summary`: human-readable description of what changed (shown to the owner during /mentor).
+- `diff`: optional unified diff for the LLM's own record. Not required.
+
+The tool appends one item to `review_queue.jsonl` with `kind: "compression"`. The owner walks through it in `/mentor`; `apply_queue_decision` does the actual file swap (see 7.6).
+
+Returns the assigned queue item ID.
+
+### 7.12 — `apply_profile_summary(text: str) -> bool`
+
+Writes a new `profile.yaml.summary.text` directly — no owner review. The summary is a derived field (regenerable on the next weekly run), so owner review would be friction without value.
+
+Used by the Sunday 04:10 summary regeneration cron. Bumps `meta.last_updated`. Auto-commits.
+
+### 7.13 — `list_inbox() -> list[str]`
+
+Returns the names of files currently in `~/.hermes/solomon/inbox/`. No side effects.
+
+### 7.14 — `read_inbox_file(name: str, max_chars: int = 60_000) -> str`
+
+Returns the text of one inbox file. Caps at `max_chars` so a large document doesn't blow the LLM's context; if truncated, appends a `[TRUNCATED — file is N chars; first M shown]` marker so the LLM can react.
+
+Refuses paths that contain `/` or start with `..` (defense against directory traversal).
+
+### 7.15 — `archive_file(name: str, status: str = "processed", error: str | None = None) -> str`
+
+Moves an inbox file into `archive/<status>/<YYYY-MM-DD>/`. `status` must be `"processed"` or `"failed"`. On `"failed"`, the optional `error` argument is written to a sibling `.error.txt` file.
+
+Idempotent: if the source no longer exists, returns the would-be destination path without raising. On filename collisions, appends `.1`, `.2`, … to avoid clobbering.
+
+Returns the destination path as a string.
+
+### 7.16 — `list_pending_actions_due_for_nudge() -> list[dict]`
+
+Returns pending action items that are eligible for a nudge right now. Filter rules:
+- `status == "pending"`
+- `owner_notified_at` is set (no nudges for un-notified items)
+- `nudge_count < NUDGE_MAX` (3)
+- now > `last_nudge_at + min_interval(urgency)` — urgency-specific minimums are 1h (high), 4h (medium), 12h (low)
+
+The daily reflection cron iterates this list and decides for each whether to call `send_nudge`.
+
+### 7.17 — `send_nudge(item_id: str, text: str) -> bool`
+
+Sends a nudge to the owner about a pending action and updates the item's bookkeeping. Enforces the cadence rule on its own — if the item isn't actually due (per the same filter rules as 7.16), this is a no-op and returns `False`. This is the safeguard against the LLM bypassing the cadence by calling `send_nudge` directly.
+
+On a successful send:
+- Increments `nudge_count`.
+- Sets `last_nudge_at` to now.
+- If `nudge_count` hits `NUDGE_MAX`, marks the item `status: "stale"` (it will appear in `/mentor`'s stale list).
+
+On send failure (gateway down): the message is queued in `pending_messages.jsonl` and `nudge_count` is NOT incremented — the next cron retries.
+
+### 7.18 — `send_to_owner(text: str, target: str | None = None) -> bool`
+
+Pushes a proactive message to the owner via the configured Hermes gateway. `target` is optional — if omitted, Solomon uses Hermes' "home channel" (the channel the owner registered for proactive messages). Common explicit targets: `telegram:<chat_id>`, `imessage:<phone>`.
+
+On gateway failure, the message is queued in `pending_messages.jsonl` for the next cron to retry.
+
+Used by the LLM during cron turns for: weekly check-in messages, ingest summaries, and any direct owner notifications outside the action-nudge cadence.
+
+### 7.19 — `retry_pending_messages() -> int`
+
+Re-dispatches anything in `pending_messages.jsonl`. Successful sends are removed from the file; failures stay queued. Returns the count of messages actually sent.
+
+The daily reflection cron calls this once at the end of its turn so transient gateway outages don't lose proactive messages.
+
 ---
 
-## 8. The Eight Slash Commands
+## 8. The Nine Slash Commands
 
-Slash commands are registered with Hermes through `ctx.register_command`. When a user types one, Hermes dispatches to Solomon's handler with the parsed argument dict.
+Slash commands are registered with Hermes through the real
+`register_command(name, description, handler)` API. The handler signature is
+`(raw_args: str) -> str | None` — Hermes does NOT pass `session_id` to slash
+handlers and the handler's return string is shown directly to the owner
+(no LLM call is involved). For commands that need to start an LLM-driven
+session in a particular mode (`/onboard`, `/mentor`, `/private`,
+`/endprivate`), the handler writes a "pending intent" file with a 60-second
+TTL; the next `pre_llm_call` (which DOES carry `session_id`) claims it and
+sets the active mode for that session. See [Section 14 — Hermes
+Integration](#14-hermes-integration) for the full pattern.
 
-Each command's specification below covers: what the user types, what arguments it accepts, what the handler does, and what the user sees.
+Each command's specification below covers: what the user types, what
+arguments it accepts, what the handler does, and what the user sees.
 
 ### 8.1 — `/onboard`
 
@@ -1130,21 +1229,20 @@ If there are stale items, also print: `Run /mentor to address stale items so Sol
 
 **User sees:** A plain text status report. No LLM call.
 
-### 8.4 — `/private` (toggle)
+### 8.4 — `/private`
 
-**User types:** `/private` (no arguments). Typing it once turns private mode on; typing it again turns it off.
+**User types:** `/private` (no arguments). Turns private mode on for the current session. Pair with `/endprivate` (8.9) to turn it back off.
 
 **Handler:**
-1. Read the current value of `session.private` (default `False`).
-2. Flip it: `session.private = not session.private`.
-3. Log a `private_activated` or `private_deactivated` event accordingly.
-4. Return one of:
-   - On activation: "Private mode is on for this conversation. Nothing said from here on will be logged, learned from, or added to the review queue. This conversation will not appear in tomorrow's reflection. Type /private again to turn it back off."
-   - On deactivation: "Private mode is off. From this point forward in this conversation, Solomon is loaded and learning resumes. The turns that happened in private mode remain unlogged."
+1. Push a `"private_on"` pending intent.
+2. Return: "Private mode will turn on for this conversation starting with your next message. Nothing said from here on will be logged, learned from, or added to the review queue. Type /endprivate to turn it back off."
 
-**Effect (when on):** The `pre_llm_call` hook checks for `session.private` and skips Solomon's system-prompt injection. The `post_llm_call` hook logs only a `private_turn` event with no content. The daily reflection cron skips any turn marked private when it reads Hermes's conversation log.
+**Effect:** The next `pre_llm_call` claims the pending intent and calls `session_state.mark_private(session_id)`. From then on:
+- `pre_llm_call` returns `None` (no Solomon context injection) for any session in `private_sessions.jsonl`.
+- `post_llm_call` logs only a `private_turn` event with no content.
+- The daily reflection cron's `read_conversations` filters out private session IDs by default.
 
-**User sees:** A confirmation message reflecting the new state.
+**User sees:** A confirmation message stating private mode begins on the next turn.
 
 ### 8.5 — `/reflect`
 
@@ -1185,6 +1283,18 @@ If there are stale items, also print: `Run /mentor to address stale items so Sol
 
 **User sees:** A confirmation message.
 
+### 8.9 — `/endprivate`
+
+**User types:** `/endprivate` (no arguments). Turns private mode off for the current session.
+
+**Handler:**
+1. Push a `"private_off"` pending intent.
+2. Return: "Private mode will turn off starting with your next message. Solomon resumes loading the role and learning. Anything said during private mode remains unlogged."
+
+**Effect:** The next `pre_llm_call` claims the pending intent and calls `session_state.unmark_private(session_id)`. From the next turn onward, Solomon resumes normal context injection. Turns that happened during private mode are not retroactively reconstructed.
+
+**User sees:** A confirmation message.
+
 ---
 
 ## 9. The Proactive Inbound Flow
@@ -1212,15 +1322,15 @@ The flow is invariant to source. The handler only needs to know: it's an inbound
 When Hermes receives an inbound external message:
 
 1. **Hermes routes the message through the normal pre_llm_call path.** Solomon's hook fires.
-2. **Solomon's `pre_llm_call` hook injects the standard always-loaded context** (the `solomon-default.md` skill, vocabulary, profile summary, tool menu).
-3. **The hook detects this is an inbound external message** (not the owner typing directly) by checking Hermes's message metadata — specifically the `source` or `sender` field. The hook adds one extra line to the injected context: `INBOUND CONTEXT: This message is from an external source via <channel>. Apply the two-pass inbound flow per your skill instructions.`
+2. **Solomon's `pre_llm_call` hook returns the standard injected context** (a `{"context": "..."}` dict carrying `solomon-default.md`, vocabulary, profile summary, and tool menu — see Section 12). Hermes splices the returned context into the user message, preserving the prompt cache.
+3. **The hook detects this is an inbound external message** (not the owner typing directly) by inspecting the `platform` kwarg passed by Hermes. Platforms whose value is one of `email`, `sms`, `telegram`, `slack`, or `imessage` are treated as gateway-arrived inbounds; `cli` is the owner typing. The hook adds one extra line to the injected context: `INBOUND CONTEXT: This message is from an external source via <platform>. Apply the two-pass inbound flow per your skill instructions.`
 4. **The LLM receives the inbound and follows the two-pass thinking** specified in `solomon-default.md` Section "How you handle inbound external messages":
    - Pass 1: gut-check using already-loaded context (non-negotiables, profile summary, vocabulary).
    - Pass 2: load relevant playbooks via `read_playbook`; refine the recommendation.
    - Decide: action needed or not.
-5. **If action needed,** the LLM calls `propose_action` with all required fields. The tool writes a new line to `pending_actions.jsonl` and triggers a notification.
+5. **If action needed,** the LLM calls `propose_action` with all required fields. The tool writes a new line to `pending_actions.jsonl` and the LLM may also call `send_to_owner` to dispatch the notification immediately (or defer to the `post_llm_call` step that follows).
 6. **If no action needed,** the LLM calls `note_handled` with source_kind, source_id, reason. No file is written; only the log gets an `inbound_processed` event.
-7. **Solomon's `post_llm_call` hook detects new pending_actions items written during this turn** and dispatches the owner notification (see 9.3).
+7. **Solomon's `post_llm_call` hook detects newly-written `pending_actions.jsonl` items without `owner_notified_at` set and dispatches the owner notification through `send_to_owner` (see 9.3). This way notifications happen even if the LLM didn't call `send_to_owner` itself.
 
 ### 9.3 — Notifying the owner about a proposed action
 
@@ -1266,21 +1376,16 @@ When the owner approves (or edits-and-approves) a pending action, the handler:
 
 ### 9.5 — The nudge loop
 
-When the owner doesn't respond to a notification within the urgency-specific cadence (from `profile.yaml.meta.nudge_cadence`), the nightly cron (Section 10.1) runs a nudge step. It is a sub-step of `daily.py` so we don't add a fourth cron job:
+When the owner doesn't respond to a notification within the urgency-specific cadence (in `tools.py`: high 1h, medium 4h, low 12h; max 3 nudges, then `status: "stale"`), the nightly daily-reflection cron (Section 10.1) runs a nudge step. It is a sub-step of `daily.py`'s LLM turn — the LLM running the daily cron calls the nudge tools directly:
 
 For each pending action:
-1. Compute `next_nudge_due_at` based on `urgency` and the `nudge_cadence` settings.
-2. If `now > next_nudge_due_at` and `nudge_count < max_nudges`:
-   - Load `solomon-default.md` (the LLM picks the nudge wording, doesn't need the interview skill).
-   - Provide context: the original proposal, the time elapsed, how many nudges so far.
-   - Ask the LLM to produce a one-sentence nudge for the owner. Example: "Hey — still waiting on the McKinley contract reply. Want me to go ahead with my proposal?"
-   - Send through the preferred channel.
-   - Increment `nudge_count`, set `last_nudge_at`.
-3. If `nudge_count >= max_nudges`: set `status = stale`. Stop nudging. The next `/mentor` will surface stale items.
+1. Call `list_pending_actions_due_for_nudge()` — returns only items whose cadence interval has elapsed and whose `nudge_count < NUDGE_MAX`.
+2. For each due item, compose a one-sentence nudge in the owner's voice ("Still waiting on McKinley — want me to go ahead with my proposal?"). Call `send_nudge(item_id, text)`.
+3. The `send_nudge` tool re-checks the cadence itself (defense in depth against the LLM bypassing the rule), sends via `_adapter.send_to_owner`, increments `nudge_count`, sets `last_nudge_at`, and marks the item `status: "stale"` if the increment hits `NUDGE_MAX`.
 
-The cron runs once per day but does fast no-op cycles in between if the owner sets a custom hourly cron. For most users, once-a-day nudging is enough; high-urgency items still get nudged within hours because their `next_nudge_due_at` falls inside the next daily cycle.
+The cron runs once per day. For most users this is enough; high-urgency items still get nudged within hours because their cadence interval is 1h and a single daily run picks them up on the next cycle.
 
-For more aggressive nudging without modifying the cron, the user can run `/reflect` manually any time — it processes pending nudges too.
+For more aggressive nudging without modifying the cron, the user can run `/reflect` (which calls `daily.run_now`) any time — it processes pending nudges too.
 
 ### 9.6 — Worked example
 
@@ -1301,97 +1406,104 @@ If the owner had not replied within four hours (medium urgency), the daily cron 
 
 ---
 
-## 10. The Three Cron Jobs
+## 10. The Seventeen Cron Jobs
 
-Three Python entry points installed as cron jobs by `install.sh`. Each is a small script that wraps an LLM call and writes results to `review_queue.jsonl` or `pending_actions.jsonl`.
+Solomon registers seventeen jobs with Hermes via `cron.jobs.create_job` — the real Hermes cron API. Each job is a Hermes-managed agent turn: Hermes builds the prompt from the registered `skill=` (loaded inline), runs the agent loop with `enabled_toolsets=["solomon"]`, and applies the configured `deliver` policy on the final response (`[SILENT]` suppresses delivery, per `cron/scheduler.py:155`).
 
-### 10.1 — Nightly reflection (`daily.py`)
+The seventeen jobs split into three classes:
 
-**Schedule:** Daily at 2:00 a.m. local time.
+- **Daily reflection** (1 job) — nightly, 02:00.
+- **Weekly compression set** (15 jobs) — staggered Sunday 03:00–04:10. One job per playbook (14) plus one profile-summary regeneration job.
+- **Weekly check-in** (1 job) — Friday 15:00.
 
-**Inputs:**
-- The last 24 hours of Hermes conversation log entries, accessed through the Hermes adapter (see "Reading Hermes's conversation log" below).
-- Any files in `~/.hermes/solomon/inbox/` not yet processed.
+Registration is idempotent (`adapter.register_cron_job` does an upsert by job name) so `solomon register-crons` can be re-run safely. `solomon uninstall-crons` removes everything matching the `solomon-` name prefix.
 
-**Process:**
-1. Acquire `.daily.lock`. If held, log a WARN and exit.
-2. Log `cron_start` event for `daily`.
-3. **Reflection step.** Read Hermes's conversation log for the last 24 hours.
-4. Filter out turns marked private (the Hermes log marks them; if marking isn't supported, the conductor's `private` flag was already set on the session, and the Solomon hook logged a `private_turn` event we can cross-reference).
-5. Filter out turns that have no Solomon-meaningful content (single-word greetings, etc. — use a length and content heuristic).
-6. Group remaining turns by Hermes session. For each session's batch, load `solomon-ingest.md` and call the LLM with the conversation as input. The LLM identifies any new findings using `propose_addition` and `flag_contradiction`.
-7. **Ingestion step.** List files in `inbox/`. For each unprocessed file:
-   - Load `solomon-ingest.md`.
-   - Call the LLM with the file's content as input.
-   - Wait for the LLM to finish calling `propose_addition` and `flag_contradiction`.
-   - On success: move the file to `archive/processed/<YYYY-MM-DD>/<filename>`.
-   - On failure: move to `archive/failed/<YYYY-MM-DD>/<filename>` and write a `<filename>.error.txt` next to it with the error message.
-8. **Nudge step** (per Section 9.5). Read `pending_actions.jsonl`, filter to `status: "pending"`. For each item:
-   - Compute `next_nudge_due_at` based on its `urgency`, `owner_notified_at`, and `last_nudge_at` using the `nudge_cadence` settings in `profile.yaml.meta`.
-   - If `now > next_nudge_due_at` and `nudge_count < max_nudges`:
-     - Load `solomon-default.md`.
-     - Provide context: the original proposal text, time elapsed since `owner_notified_at`, current `nudge_count`.
-     - Ask the LLM to produce a one-sentence nudge in the owner's voice. Example: "Hey — still waiting on the McKinley contract reply. Want me to go ahead with my proposal?"
-     - Send the nudge through the owner's preferred channel (Hermes gateway API or fallback to `pending_messages.jsonl`).
-     - Increment `nudge_count`, set `last_nudge_at = now`. Auto-commit.
-     - Log a `nudge_sent` event.
-   - If `nudge_count >= max_nudges`: set `status = stale`. Auto-commit. Log `action_stale`.
-9. **Pending-message retry step.** If `pending_messages.jsonl` exists, try to dispatch each queued message via the Hermes gateway API. On success, remove from the file and log `pending_message_sent`. On failure, leave it for the next cron run.
-10. Log `cron_end` event for `daily` with summary stats: turns processed, files processed, proposals added, nudges sent, actions marked stale, pending messages dispatched.
-11. Release `.daily.lock`.
+### 10.1 — Daily reflection (`solomon-daily-reflection`)
 
-**Output:** Entries appended to `review_queue.jsonl`. Files moved out of `inbox/`. Updates to `pending_actions.jsonl` (status changes, nudge counts). Nudge messages sent. Log entries.
+**Schedule:** `0 2 * * *` — daily at 2:00 a.m. local time.
 
-**Failure handling:** If any single step or single item fails, log the error and continue. The whole cron does not abort on one failure.
+**Skill:** `solomon-ingest` (loaded inline by Hermes from `~/.hermes/skills/solomon-ingest/skill.md`).
 
-**Reading Hermes's conversation log:** Hermes maintains its own conversation history (per its documentation). The Solomon adapter (`adapter.py`) exposes one method: `read_recent_conversations(since: datetime) -> list[dict]` where each dict contains session_id, turns (list of message dicts with role, content, ts), and a private flag. The implementation calls whatever Hermes provides. If Hermes's API doesn't expose this, the adapter falls back to reading Hermes's own log file at `~/.hermes/logs/` directly. Either way, the rest of `daily.py` doesn't care about the source — it just calls the one adapter method.
+**Deliver:** `local` — final response is recorded in the cron log but not pushed to any chat. Owner-facing nudges and notifications go out via explicit `send_to_owner` / `send_nudge` tool calls within the turn.
 
-### 10.2 — Weekly compression (`weekly.py`)
+**LLM's task during this turn** (one Hermes agent turn, may call tools many times):
 
-**Schedule:** Weekly, Sunday at 3:00 a.m. local time.
+1. Call `read_conversations(since_hours=24, exclude_private=True)` to get yesterday's Solomon-bearing turns (`private_sessions.jsonl` excluded automatically).
+2. For each conversation worth reflecting on: call `propose_addition` or `flag_contradiction` for any new findings. `propose_addition` dedupes on `(file, section, content, status=pending)` so re-running the cron doesn't duplicate items.
+3. Call `list_inbox()`. For each file: call `read_inbox_file(name)`, propose additions, then call `archive_file(name, status="processed")` or `archive_file(name, status="failed", error=...)`.
+4. Call `list_pending_actions_due_for_nudge()`. For each due item, compose a short nudge and call `send_nudge(item_id, text)` — the tool re-checks the cadence rule itself.
+5. Call `retry_pending_messages()` at the end so transient gateway outages don't lose messages.
+6. Return `[SILENT]` so Hermes suppresses delivery.
 
-**Inputs:** All fourteen playbook files plus the `summary` section of `profile.yaml`. (Fifteen documents in total.)
+**Why one turn instead of multiple cron jobs:** Reflection + ingestion + nudging + retry all share context (yesterday's conversations, the live state of the queues). A single LLM turn lets the model cross-reference them — for instance, finding that a conversation already addressed an item it was about to nudge on.
 
-**Output mechanism:** Unlike the addition/contradiction flow (which goes through tool calls), the compression skill returns its result as JSON inside the LLM's response text. The cron parses the JSON from the LLM response. No tool calls happen during compression — the LLM reads the input, returns the JSON, and that's it.
+**Failure handling:** Single-tool failures are absorbed by the LLM (it sees the error in the tool result and continues). A whole-turn failure is logged by Hermes and the next 02:00 run picks up where this one stopped (idempotent dedupe in `propose_addition` and cadence-check in `send_nudge` protect against partial-execution duplicates).
 
-**Process:**
-1. Log `cron_start` event for `weekly`.
-2. For each of the fifteen files:
-   - Acquire the file lock via `profile.py`.
-   - Read the current content.
-   - Load `solomon-compress.md`.
-   - Call the LLM with the content as the user message. The skill instructs the LLM to return JSON `{"rewritten": "...", "summary": "..."}`.
-   - Parse the JSON from the LLM's response. If parsing fails, log an ERROR event and skip this file.
-   - If `summary` field equals `"No compression needed"`, release the lock and skip.
-   - Otherwise, compute the diff between the old and new content (Python's `difflib`). If the diff is trivial (under 10% reduction in characters), log a DEBUG note and skip.
-   - **For all playbook files (the fourteen markdown files):** append a `compression` item to `review_queue.jsonl` with the rewritten content stored in the item's `content` field, the LLM's `summary` in the item's `reason`, the diff in a new `diff` field for owner inspection. Status is `pending`. The owner reviews this in the next `/mentor` and calls `apply_queue_decision` to approve/edit/reject. Approval moves the old file to `archive/compressed/<YYYY-MM-DD>/<filename>` and replaces it with the new content (this is handled by `apply_queue_decision` for `kind: "compression"`, per Section 7.6).
-   - **For `profile.yaml`'s `summary` section specifically:** apply immediately without owner review. The summary is a derived, regenerable field — not original content — so requiring owner approval on every weekly tightening would create unnecessary friction. Write the new summary directly to `profile.yaml.summary.text`, update `profile.yaml.summary.generated_at`, auto-commit. Log a `summary_regenerated` event.
-3. Log `cron_end` event for `weekly` with summary stats: files compressed, files unchanged, queue items added, summary regenerated yes/no.
+### 10.2 — Weekly compression set (15 jobs)
 
-**Output:** Compression proposals in `review_queue.jsonl` (for the playbook files). Updated `profile.yaml.summary.text` (applied immediately).
+**Why 15 separate jobs instead of one iterating job:** Compressing all 14 playbooks in a single LLM turn would either (a) blow the context window or (b) suffer "lost in the middle" degradation — the LLM does its sharpest work on the first few files and degrades thereafter. A separate Hermes-cron job per playbook gives each compression a fresh context. Hermes loads only that one playbook's skill body and content, runs the LLM, propagates the proposal to the review queue, and ends. Total wall-clock cost: ~30 minutes spread across 75 minutes of cron schedule, vs. one job that would either run for hours or produce uneven results.
 
-**Failure handling:** Same as daily — log and continue. If parsing the LLM's JSON response fails for any file, log the raw response into the log entry for debugging and move on.
+**Naming convention:** `solomon-compress-<playbook>` for the fourteen playbooks (`vocabulary`, `customers`, `vendors`, `operations`, `sales`, `marketing`, `finance`, `people`, `product`, `support`, `legal`, `technology`, `strategy`, `procurement`), plus `solomon-regenerate-summary` for the profile-summary job.
 
-### 10.3 — Weekly check-in (`checkin.py`)
+**Schedule:** Sunday, staggered in 5-minute increments starting 03:00:
 
-**Schedule:** Weekly, Friday at 3:00 p.m. local time.
+```
+solomon-compress-vocabulary    Sun 03:00
+solomon-compress-customers     Sun 03:05
+solomon-compress-vendors       Sun 03:10
+solomon-compress-operations    Sun 03:15
+solomon-compress-sales         Sun 03:20
+solomon-compress-marketing     Sun 03:25
+solomon-compress-finance       Sun 03:30
+solomon-compress-people        Sun 03:35
+solomon-compress-product       Sun 03:40
+solomon-compress-support       Sun 03:45
+solomon-compress-legal         Sun 03:50
+solomon-compress-technology    Sun 03:55
+solomon-compress-strategy      Sun 04:00
+solomon-compress-procurement   Sun 04:05
+solomon-regenerate-summary     Sun 04:10
+```
 
-**Inputs:**
-- `profile.yaml`
-- A summary of last week's activity (turn counts per scope, files updated)
-- `review_queue.jsonl`
+`weekly.py:_slot_for_index(i)` computes each slot.
 
-**Process:**
-1. Log `cron_start` event for `checkin`.
-2. Load `solomon-interview.md` with mode metadata: `{"mode": "checkin"}`.
-3. Provide the inputs as context.
-4. Call the LLM. The LLM picks one or two gaps and composes a short message.
-5. Use the Hermes gateway-initiated message API to send the message to the owner through whatever channel they're configured for (Telegram, SMS, etc.).
-6. Log `cron_end` event with: message sent, gateway used.
+**Skill:** `solomon-compress` (loaded inline).
 
-**Gateway-initiated messaging:** Hermes provides a function for plugins to push a message to the user (used for proactive notifications). Solomon calls this with the LLM-composed message text. If Hermes's gateway is unavailable, the message is queued in `~/.hermes/solomon/pending_messages.jsonl` and retried by the next cron run.
+**Deliver:** `local`.
 
-**Failure handling:** Same as daily — log and continue. If the gateway send fails, the message is queued for retry.
+**Per-playbook task:**
+
+1. Call `read_playbook(name)` for the single playbook this job covers (name is in the job's prompt).
+2. Produce a tighter rewrite. The skill body specifies: preserve every verbatim phrase, principle, and worked example; compress redundancy and structural clutter; do not invent new content.
+3. Call `propose_compression(file=name, content=<rewritten>, summary=<what changed>, diff=<optional>)`. This appends a `kind: "compression"` item to `review_queue.jsonl`; the owner approves in `/mentor`, and `apply_queue_decision` does the actual file swap (Section 7.6).
+4. If no meaningful change is warranted, call `propose_compression` with `summary: "No compression needed this week"` so the cron log still records that the LLM looked at it. The owner can ignore these items in `/mentor`.
+5. Return `[SILENT]`.
+
+**Profile-summary task** (`solomon-regenerate-summary`):
+
+1. Call `read_profile("meta")` and `read_profile(...)` for each filled foundation section to gather material.
+2. Compose a fresh 300–500 token summary capturing identity, principles, non-negotiables, and current state.
+3. Call `apply_profile_summary(text)` — applies immediately. The summary is a derived/regenerable field; owner review would be friction without value.
+4. Return `[SILENT]`.
+
+**Failure handling:** Same as daily. Single-playbook failures only affect that playbook; the other thirteen run normally on their own schedule.
+
+### 10.3 — Weekly check-in (`solomon-weekly-checkin`)
+
+**Schedule:** `0 15 * * 5` — Friday at 3:00 p.m. local time.
+
+**Skill:** `solomon-interview` (loaded inline; the skill body branches on mode metadata included in the cron prompt: `{"mode": "checkin"}`).
+
+**Deliver:** `origin` — Hermes auto-delivers the LLM's final response to the platform-home channel registered for the owner (Telegram home chat, SMS home number, etc.). This is the only Solomon cron that produces a directly-visible owner message via Hermes's standard delivery — others use explicit `send_to_owner` tool calls.
+
+**LLM's task during this turn:**
+
+1. Call `read_profile("meta")` and look at `review_queue.jsonl` / `pending_actions.jsonl` (via `read_queue`) for what's been outstanding this week.
+2. Pick one or two genuine gaps or unresolved items.
+3. Compose a short, owner-voice message: "Friday check-in — you've had three contradictions sitting in the queue for over a week. Want to talk through them?" or "Wanted to flag that we still don't have an answer on the McKinley contract — should I draft something more aggressive?"
+4. Return the message text as the final response. Hermes delivers it via `origin`.
+
+**Failure handling:** If the LLM's response isn't suitable for delivery (e.g., it returns `[SILENT]` because nothing's worth flagging), Hermes suppresses delivery and the owner sees nothing this Friday. That's fine — the goal is genuine substance, not noise.
 
 ---
 
@@ -1478,45 +1590,61 @@ The LLM, during session 6, walks the owner through common scope categories (cust
 
 ## 12. The Loading Strategy
 
-Solomon has fifteen documents on disk. Loading all of them into every Hermes turn would burn 10,000+ tokens before the LLM even sees the user's message. The strategy keeps the always-loaded footprint small and gives the LLM tools to load more on demand.
+Solomon has fifteen documents on disk. Loading all of them into every Hermes turn would burn 10,000+ tokens before the LLM even sees the user's message. The strategy keeps the always-injected footprint small and gives the LLM tools to load more on demand.
 
-### Always loaded (every Hermes turn, ~1,500 tokens)
+### How injection actually works in Hermes
 
-Injected by the `pre_llm_call` hook into the system prompt, in this order:
+Hermes hooks for `pre_llm_call` return a dict — when that dict contains a `"context"` key, Hermes splices the context string into the **user message** for the current turn, not into the system prompt. This is deliberate: the system prompt is part of the prompt cache (5-minute TTL, ~90% discount on cached tokens), and Hermes does not want plugins invalidating the cache on every turn. By putting Solomon's per-turn context into the user message, the cached system prompt stays intact while Solomon's small per-turn injection rides along uncached.
+
+Hermes does NOT honor an `always_load: true` flag on skill frontmatter — skills appear only in the `<available_skills>` index in the system prompt, and the LLM views their full body via the `skill_view(name)` tool when needed. Solomon's strategy therefore relies entirely on the `pre_llm_call` return value, not on skill frontmatter.
+
+### Always injected (every non-private Hermes turn, ~1,500 tokens)
+
+Returned by `hooks.pre_llm_call` as the `context` field of the return dict, in this order:
 
 1. The body of `solomon-default.md` (~500 tokens)
 2. The current content of `vocabulary.md` (~300 tokens once the owner has captured a reasonable vocabulary; ~100 tokens at start)
-3. The `summary` field of `profile.yaml` (~500 tokens; regenerated weekly by compression)
-4. The fixed tool menu (one line per tool, ~150 tokens):
+3. The `summary` field of `profile.yaml` (~500 tokens; regenerated weekly by the Sunday 04:10 summary cron)
+4. The fixed tool menu (one line per tool, ~250 tokens):
 
 ```
-Available tools:
-- read_playbook(name) — load one playbook on demand. Names: customers, vendors, operations, sales, marketing, finance, people, product, support, legal, technology, strategy, procurement.
-- read_profile(section) — load one foundation section on demand. Sections: industry, belief_system, why, principles, ideal_outcomes, non_negotiables, scopes, meta.
-- read_queue(status, limit) — read items from the review queue.
+Available tools (toolset: solomon):
+- read_profile(section) — load one foundation section. Sections: industry, belief_system, why, principles, ideal_outcomes, non_negotiables, scopes, meta, summary.
+- read_playbook(name) — load one playbook. Names: vocabulary, customers, vendors, operations, sales, marketing, finance, people, product, support, legal, technology, strategy, procurement.
+- read_queue(status, limit, queue) — read items from a queue. queue is "review" or "actions".
+- read_conversations(since_hours, limit, exclude_private) — read recent Hermes conversations (used by daily cron).
 - propose_addition(file, section, content, reason) — propose a new capture for owner review.
 - flag_contradiction(description, sources) — flag a contradiction for owner resolution.
-- propose_action(source_kind, source_id, source_summary, source_content_excerpt, first_pass_prediction, final_recommendation, reasoning, playbooks_consulted, urgency, action_kind, action_payload) — propose an action on an inbound external message. Use after the two-pass thinking.
+- propose_action(source_kind, source_id, source_summary, source_content_excerpt, first_pass_prediction, final_recommendation, reasoning, playbooks_consulted, urgency, action_kind, action_payload) — propose an action on an inbound external message.
 - note_handled(source_kind, source_id, reason) — record that an inbound was considered and no action was needed.
-- apply_queue_decision(item_id, decision, edited_content) — used during /mentor to apply owner decisions.
+- propose_compression(file, content, summary, diff) — queue a tightened playbook rewrite for owner review (weekly compression).
+- apply_queue_decision(item_id, decision, edited_content) — apply owner decision during /mentor.
+- apply_profile_summary(text) — write a new profile.yaml.summary.text (no owner review; derived field).
 - mark_session_complete(session_n, summary) — finalize an onboarding session.
+- list_inbox() — list files in ~/.hermes/solomon/inbox/.
+- read_inbox_file(name, max_chars) — read one inbox file.
+- archive_file(name, status, error) — move inbox file to archive/processed or archive/failed.
+- list_pending_actions_due_for_nudge() — return action items whose cadence interval has elapsed.
+- send_nudge(item_id, text) — send a nudge about a pending action; enforces cadence.
+- send_to_owner(text, target) — push a proactive message to the owner's preferred channel.
+- retry_pending_messages() — re-dispatch anything queued in pending_messages.jsonl.
 ```
 
 ### Loaded on demand by the LLM
 
-The LLM calls `read_playbook(name)` to pull a specific playbook into its context. The LLM is instructed (in `solomon-default.md`) to load only what the current conversation needs. If the LLM picks badly, we improve the instructions in `solomon-default.md` rather than adding code.
+The LLM calls `read_playbook(name)` to pull a specific playbook into its context. The LLM is instructed (in `solomon-default.md`) to load only what the current conversation needs. If the LLM picks badly, we tune `solomon-default.md` instead of adding code.
 
 ### Never auto-loaded
 
-- The full `profile.yaml` (the LLM uses `read_profile(section)` for specific sections)
-- The contents of `inbox/`, `archive/`, or `logs/`
-- The other three skill files (loaded only by their respective slash commands or crons)
+- The full `profile.yaml` — the LLM uses `read_profile(section)` for specific sections.
+- The contents of `inbox/`, `archive/`, or `logs/`.
+- The other three skill files (`solomon-interview`, `solomon-ingest`, `solomon-compress`) — loaded inline only by their corresponding slash commands or crons (via the cron `skill=` parameter, verified at `cron/scheduler.py:1116-1149`).
 
 ### Token budget over time
 
-In the first month, when the playbooks are sparse, the LLM may load three or four files per turn and the per-turn token cost is moderate. As the playbooks fill out, two things happen: the LLM gets better at picking the right ones (because they have more identifying content), and the weekly compression keeps each file tight. The expected trajectory is that the average per-turn token count stays roughly constant or trends downward as the owner uses the system longer.
+In the first month, when the playbooks are sparse, the LLM may load three or four files per turn and the per-turn token cost is moderate. As the playbooks fill out, two things happen: the LLM gets better at picking the right ones (more identifying content), and the weekly compression keeps each file tight. The expected trajectory is that average per-turn token count stays roughly constant or trends downward as the owner uses the system longer.
 
-This is measurable. The log entries include token counts. After three months, the average tokens-per-turn should be no higher than the average at month one. If it isn't, we tune `solomon-default.md` to be more selective about playbook loading.
+This is measurable. The log entries include token counts. After three months, the average tokens-per-turn should be no higher than the average at month one. If it isn't, tune `solomon-default.md` to be more selective about playbook loading.
 
 ---
 
@@ -1567,103 +1695,167 @@ A relational database with foreign keys would do this enforcement automatically.
 
 ## 14. Hermes Integration
 
-Solomon uses only the public Hermes plugin contract. The integration lives in one file (`plugin.py`). Solomon does not fork Hermes, does not patch Hermes, and does not depend on Hermes internals beyond the documented APIs.
+Solomon uses only the public Hermes plugin contract. The integration is concentrated in two files: `plugin.py` (the entry point) and `adapter.py` (the single source of every Hermes-shaped name). Solomon does not fork Hermes, does not patch Hermes, and does not depend on Hermes internals beyond the verified plugin APIs.
+
+### Plugin manifest
+
+Every Hermes plugin must ship a `plugin.yaml` next to its module. Solomon's manifest:
+
+```yaml
+name: solomon
+version: 1.0.0
+description: "Personal business brain. Turns Hermes into a specialist for one owner's business."
+author: kelix42
+kind: standalone
+platforms: [linux, macos]
+provides_tools: [read_profile, read_playbook, read_queue, propose_addition,
+  flag_contradiction, propose_action, note_handled, propose_compression,
+  apply_profile_summary, apply_queue_decision, mark_session_complete,
+  read_conversations, list_inbox, read_inbox_file, archive_file,
+  list_pending_actions_due_for_nudge, send_nudge, send_to_owner,
+  retry_pending_messages]
+provides_hooks: [pre_llm_call, post_llm_call, on_session_start]
+```
+
+The `kind: standalone` declares Solomon is a first-class Hermes plugin (not a sub-mode of another plugin). Hermes's `discover_plugins()` reads this manifest at startup and at the start of each cron job (`cron/scheduler.py:292,376`), so cron-side LLM turns see Solomon's tools and hooks the same way conversational turns do.
 
 ### Plugin entry point
 
-`plugin.py` exposes a `register(ctx)` function that Hermes calls once at startup. The function:
-
-1. Wraps the Hermes ctx in a small adapter (one file: `adapter.py`) so that if Hermes's API ever changes shape, only this file needs updating.
-2. Initializes Solomon's logging.
-3. Calls `tools.register_all(ctx)` to register the nine tools.
-4. Calls `slash.register_all(ctx)` to register the eight slash commands.
-5. Calls `hooks.register_all(ctx)` to attach hook handlers.
-6. Logs a "Solomon ready" entry.
-
-### Hooks attached
-
-Through `ctx.register_hook`:
-
-- `pre_llm_call` → `hooks.pre_llm_call(messages, session)`. The handler:
-  1. Checks for `.solomon_off` sentinel. If present, return without modification.
-  2. Checks if `session.private` is set. If so, return without modification.
-  3. Reads `solomon-default.md` (cached in memory after first read; reloaded if the file's mtime changes).
-  4. Reads `vocabulary.md`.
-  5. Reads `profile.yaml`, extracts `summary.text`.
-  6. Builds the always-loaded block (skill + vocabulary + summary + menu).
-  7. Prepends the block as a system-role message to `messages`. The list is mutable; Hermes will see the modification.
-
-### How skills with mode metadata are loaded by slash commands
-
-Slash commands like `/onboard` and `/mentor` use the `solomon-interview.md` skill but need to tell the LLM which mode it's operating in (onboarding session N, mentoring, or checkin) and pass mode-specific parameters. The mechanism is the same prepend-to-messages pattern as the default hook, but the slash handler does it instead of the pre_llm_call hook (which is skipped for these turns since the slash handler controls the system prompt directly).
-
-For `/onboard`, the slash handler appends two messages to the system prompt in order:
-
-1. The body of `solomon-interview.md` (the role).
-2. A short JSON metadata block like:
-
-```
-MODE: onboarding
-SESSION: 0 (industry & sector)
-REQUIRED FIELDS: business_category, primary_product_or_service, customer_orientation, geographic_scope, revenue_model, growth_stage, concentration_risk
-SESSION SCHEMA: see profile.yaml.industry section. Each field maps to a key in the dict you pass to mark_session_complete.
-```
-
-For `/mentor`, the metadata block is:
-
-```
-MODE: mentoring
-PENDING QUEUE ITEMS: N (use read_queue to load them)
-```
-
-For the weekly check-in cron, the metadata block is:
-
-```
-MODE: checkin
-LAST WEEK ACTIVITY: <one-paragraph summary the cron computed>
-PENDING UNRESOLVED ITEMS: <count and brief list from review_queue>
-TASK: Pick one or two genuine gaps. Compose one short message inviting the owner to talk. Return the message text as your response.
-```
-
-The slash/cron handler sets `session.solomon_skill_overridden = True` before returning. The `pre_llm_call` hook checks this flag at the start of its handler:
+`plugin.py` exposes a `register(ctx)` function. Hermes calls it once at process startup, with a `ctx` object that exposes `register_tool`, `register_command`, `register_hook`, and access to Hermes's cron / state / sending modules.
 
 ```python
-if getattr(session, "solomon_skill_overridden", False):
-    session.solomon_skill_overridden = False  # consume the flag
-    return  # don't inject default; the slash handler provided its own
+def register(ctx) -> None:
+    adapter = HermesAdapter(ctx)
+    logs.init()
+    tools.register_all(adapter)       # 19 tools, all in the "solomon" toolset
+    slash.register_all(adapter)       # 9 slash commands
+    hooks.register_all(adapter)       # 3 hooks
+    logs.log("plugin_register")
 ```
 
-This way the default injection is suppressed for the slash command's response, but the next normal turn gets default treatment again.
+`HermesAdapter` wraps `ctx` with the real Hermes call signatures. If Hermes's API ever changes shape, only `adapter.py` updates.
 
-- `post_llm_call` → `hooks.post_llm_call(response, session)`. The handler:
-  1. If `session.private`, log a minimal `private_turn` event and return.
-  2. Otherwise, log a `turn_end` event with token counts (from the response object) and any tool calls that were made.
+### Tool registration
 
-- `on_session_start` → `hooks.on_session_start(session)`. The handler:
-  1. Initialize `session.private = False`.
-  2. Log a `session_start` event.
+`adapter.register_tool` calls Hermes's underlying API with the verified signature:
 
-### Gateway-initiated messages (for weekly check-in)
+```python
+ctx.register_tool(
+    name="propose_addition",
+    toolset="solomon",                # positional; required
+    schema={...JSONSchema...},        # kwarg is `schema=`, not `parameters=`
+    handler=propose_addition,
+)
+```
 
-The weekly check-in cron needs to push a message to the user proactively. Two paths, tried in order:
+All 19 tools live in a single toolset named `solomon` (constant `SOLOMON_TOOLSET` in `adapter.py`). Cron jobs enable only this toolset via `enabled_toolsets=["solomon"]`.
 
-1. **Hermes gateway API.** At build time, inspect Hermes's current plugin API documentation for the function that lets a plugin send a message to the user through their configured gateway. The Hermes adapter (`adapter.py`) wraps this function so the rest of Solomon calls one method. If the function exists and the call succeeds, the message is sent. Log a `checkin_sent` event with the gateway used.
+### Slash command registration
 
-2. **Fallback: pending queue.** If the Hermes gateway API does not exist, is not reachable, or returns an error, the message is appended to `~/.hermes/solomon/pending_messages.jsonl` with timestamp and intended target. The next time the owner runs `/status`, a notification at the top says "You have N pending check-in messages from Solomon. Run /mentor to read them." The next `/mentor` session loads them as the first items to walk through.
+`adapter.register_command` calls `ctx.register_command(name, description, handler)`. The real Hermes handler signature is `(raw_args: str) -> str | None` — Hermes does NOT pass `session_id` to slash handlers, and the returned string is shown directly to the owner (no LLM call).
 
-This means the check-in is robust: even with no gateway integration, the messages are not lost — they just wait for the owner to come back. The first time we run on a Hermes version that supports gateway-initiated messages, the experience becomes proactive without any code change to Solomon.
+For commands that need to start an LLM-driven session in a particular mode (`/onboard`, `/mentor`, `/private`, `/endprivate`), the handler:
+
+1. Writes a "pending intent" file at `~/.hermes/solomon/.pending_intent.json` with a 60-second TTL. The intent records what mode to enter and any per-mode parameters (e.g., session number for `/onboard`).
+2. Returns a short user-facing acknowledgement.
+
+The next turn's `pre_llm_call` — which DOES carry `session_id` — claims the intent (atomically, with TTL check) and applies it: for onboarding/mentoring, swap the injected context for the appropriate skill body plus mode metadata; for private mode, call `session_state.mark_private(session_id)`.
+
+This pattern is the canonical workaround for Hermes not passing `session_id` to slash handlers.
+
+### Hook signatures (verified against real Hermes)
+
+`adapter.register_hook(event, handler)` accepts the three hook events: `pre_llm_call`, `post_llm_call`, `on_session_start`. Handlers receive keyword-only arguments matching Hermes's documented call sites:
+
+```python
+def pre_llm_call(*, session_id, user_message, conversation_history,
+                  is_first_turn, model, platform, **_) -> dict | None:
+    # 1. Claim any pending intent from a slash handler in this session.
+    # 2. If sentinel ~/.hermes/solomon/.solomon_off exists, return None.
+    # 3. If session_id is in private_sessions.jsonl, return None.
+    # 4. Pick the right context based on the claimed active mode
+    #    (default / onboarding / mentoring / checkin / private_on / private_off).
+    # 5. Return {"context": "<solomon-default body + vocabulary + summary +
+    #    tool menu + mode metadata>"}.
+    ...
+
+def post_llm_call(*, session_id, response, tool_calls, model, platform,
+                   **_) -> None:
+    # 1. If session is private: log private_turn event only, no content.
+    # 2. Otherwise: log turn_end with token counts + tool calls.
+    # 3. Call inbound.dispatch_pending_notifications() so any
+    #    pending_actions written this turn fire owner notifications.
+    ...
+
+def on_session_start(*, session_id, platform, **_) -> None:
+    # Log session_start.
+    ...
+```
+
+The `pre_llm_call` return shape — `{"context": "..."}` — is critical. Hermes splices the context into the **user message** for that turn, not the system prompt. This preserves the prompt cache (~90% discount on cached tokens after the first turn). Hermes does NOT honor `always_load: true` on skill frontmatter; that's why the always-injected payload comes from this hook return value instead.
+
+### Cron registration
+
+`adapter.register_cron_job` calls `cron.jobs.create_job` (or `update_job` if a job with the same name already exists — idempotent). The verified call signature:
+
+```python
+cron.jobs.create_job(
+    name="solomon-daily-reflection",
+    prompt="<one-line task description; the skill body provides the role>",
+    schedule="0 2 * * *",
+    skill="solomon-ingest",                 # loaded inline by Hermes
+    enabled_toolsets=["solomon"],
+    deliver="local",                        # or "origin" or "<platform>:<chat>"
+    enabled=True,
+)
+```
+
+The `skill=` parameter is the mechanism for loading a skill body fully into the cron's agent turn (verified at `cron/scheduler.py:1116-1149`). The `[SILENT]` convention (`cron/scheduler.py:155`) lets the LLM suppress delivery on a job whose `deliver` is set to push somewhere — just return `[SILENT]` as the final response.
+
+### Conversation history
+
+`adapter.read_conversations(since, limit, exclude_session_ids)` wraps `hermes_state.SessionDB`:
+
+```python
+db = hermes_state.SessionDB()
+rich = db.list_sessions_rich(since=since, limit=limit)
+for entry in rich:
+    if entry.session_id in exclude_session_ids:
+        continue
+    msgs = db.get_messages_as_conversation(entry.session_id)
+    ...
+```
+
+The daily reflection cron calls this through the `read_conversations` tool to find learning material from the last 24 hours.
+
+### Proactive outbound messages
+
+`adapter.send_to_owner(text, target=None)` wraps `tools.send_message_tool.send_message_tool(args)` — Hermes's standard plugin-to-owner pathway, which works from cron without needing an agent loop. When `target` is omitted, the adapter consults the platform "home channel" environment variables (`HERMES_TELEGRAM_HOME_CHAT_ID`, `HERMES_SMS_HOME_NUMBER`, etc.) and Hermes's own routing.
+
+On gateway failure, the message is appended to `pending_messages.jsonl`. The daily cron calls `retry_pending_messages()` at the end of its turn so transient outages don't lose messages.
+
+### Private mode (Solomon-side filter)
+
+Hermes always writes conversation turns to `~/.hermes/state.db`. Solomon does not try to suppress this — it would require Hermes-side support that does not exist. Instead Solomon maintains its own `private_sessions.jsonl` and filters at read time:
+
+- `pre_llm_call` returns `None` (skipping Solomon injection) for any session in the file.
+- `post_llm_call` logs only a `private_turn` event with no content.
+- `read_conversations` excludes those session IDs by default.
+
+This means: turns happen in Hermes's DB, but Solomon never sees them and never learns from them. From the owner's perspective, private mode behaves correctly.
 
 ### What we use from Hermes that we do not duplicate
 
-- **Skills loading.** Hermes natively reads `~/.hermes/skills/`. Solomon drops its four skill files there and lets Hermes handle loading and progressive disclosure.
-- **Slash command parsing.** Hermes parses slash commands and arguments; our handlers receive a parsed dict.
-- **Conversation logging.** Hermes maintains the conversation log. The nightly reflection reads from it; Solomon does not maintain its own.
-- **Approval workflows.** Hermes already has machinery for "draft this and let the user approve before sending." Solomon's scopes feed into that; we don't reimplement.
-- **MCP server integration.** Solomon does not use MCP. Tools are registered directly via `register_tool`. (If a future use case calls for it, MCP is available.)
+- **Skills loading inline.** Hermes loads the `skill=` named in a cron job's spec directly into the agent turn's prompt. We don't read or splice skill files ourselves for cron turns.
+- **Slash command parsing.** Hermes parses `/cmd arg` and routes to the registered handler.
+- **Conversation persistence.** Hermes's `state.db` is the source of truth for conversation history; Solomon reads via `SessionDB`.
+- **Outbound delivery.** Hermes's `send_message_tool` handles platform-specific delivery (Telegram bot API, SMS provider, email gateway). Solomon just hands it text.
+- **Cron scheduling.** Hermes's cron module handles cron expression parsing, agent-turn invocation, delivery policies, and the `[SILENT]` suppression convention. Solomon registers jobs and lets Hermes run them.
+- **MCP server integration.** Solomon does not use MCP. Tools register directly via `register_tool`. (If a future use case calls for it, MCP remains available.)
 
 ### What changes in the Hermes config
 
-`~/.hermes/config.yaml` gets one line added: `solomon` is appended to `plugins.enabled`. A backup at `config.yaml.pre-solomon` is created. The install script handles this; the uninstall script restores it.
+`install.sh` makes a single config change via the Hermes CLI: `hermes plugins enable solomon`. Before doing so, it backs up `~/.hermes/config.yaml` to `~/.hermes/config.yaml.pre-solomon`. `solomon uninstall` restores the backup (or falls back to `hermes plugins disable solomon` if no backup exists), then optionally purges `~/.hermes/solomon/` when invoked with `--purge`.
 
 ---
 

@@ -14,13 +14,34 @@ curl -fsSL https://raw.githubusercontent.com/kelix42/solomon/main/install.sh | b
 
 What this does:
 
-1. Installs Hermes if you don't already have it.
+1. Checks that Hermes is already installed (Solomon does NOT install Hermes for you — see [the Hermes README](https://github.com/NousResearch/hermes-agent) if you don't have it yet).
 2. Installs Solomon as a Hermes plugin.
 3. Creates one folder at `~/.hermes/solomon/` to hold everything Solomon knows about you.
-4. Sets up three nightly background jobs (reflection, compression, check-in).
+4. Registers 17 background jobs with Hermes (1 nightly reflection, 14 weekly playbook compressions, 1 weekly summary regeneration, 1 weekly check-in).
 5. Tells you to open Hermes and type `/onboard` to start.
 
 That's the whole install. No database. No Docker. No prompts.
+
+## Running cost
+
+Solomon adds tokens to your existing Hermes spend — it doesn't replace it. The
+range depends mostly on how many inbound messages flow through your gateways
+and how often you talk to Hermes.
+
+| Profile | Conversation turns/day | Inbound messages/day | Sonnet-equivalent monthly cost |
+|---|---|---|---|
+| **Light** — solo founder, occasional use | ~5 | ~5 | **$3–$5/mo** |
+| **Typical** — daily use, real inbox flow | ~25 | ~30 | **~$26/mo** |
+| **Heavy** — multi-gateway, high inbound volume | ~75 | ~100 | **$80+/mo** |
+
+These are incremental — on top of whatever you already pay Hermes for the LLM
+calls Solomon's role adds context to. The biggest single line item is the
+weekly compression set (~$2–$8/week depending on how full your playbooks are).
+The daily reflection cron is the second-biggest. Both cap themselves: the
+weekly compression set is 15 jobs that each cover one document; the daily
+reflection is one job that runs once and exits.
+
+Run `solomon logs --today --grep tokens` to see your actual usage.
 
 ## First steps
 
@@ -55,7 +76,7 @@ Useful commands:
 | `/onboard` | Continue the foundation interviews |
 | `/mentor` | Walk through pending items with Solomon (do this once a week) |
 | `/status` | Show what's done, what's pending |
-| `/private` | Turn off learning for this conversation |
+| `/private` / `/endprivate` | Turn learning off / on for the current conversation |
 | `/ingest` | Process documents you dropped in `~/.hermes/solomon/inbox/` |
 | `/reflect` | Run the nightly reflection now |
 | `/solomon-off` / `/solomon-on` | Globally suspend / resume Solomon |
