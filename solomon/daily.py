@@ -140,6 +140,13 @@ def run(*, adapter: Optional[Any] = None,
     return summary
 
 
+def run_now() -> dict:
+    """Manual override — fire the daily cron once, right now. Used by /reflect.
+    Step 6 will replace this and `run` with a thin Hermes-cron registration.
+    """
+    return run()
+
+
 def main() -> int:
     """Entry point if invoked as a script."""
     run()

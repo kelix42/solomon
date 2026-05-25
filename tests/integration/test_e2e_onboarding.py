@@ -1,14 +1,17 @@
 """End-to-end: a scripted /onboard session 0 → profile.yaml filled.
 
 Simulates what would happen if a real owner did session 0 in Hermes:
-  1. Owner types /onboard. Solomon returns the interview-mode system prompt.
-  2. The owner has a back-and-forth conversation with the LLM.
+  1. Owner types /onboard. The slash handler returns text and pushes a
+     pending intent.
+  2. Owner's next message triggers pre_llm_call, which claims the intent
+     and sets the active mode for the session.
   3. The LLM (scripted here) eventually calls mark_session_complete.
   4. profile.yaml.industry is filled.
   5. /status shows "1 of 7 complete".
 
 This test doesn't exercise a real LLM — it exercises the wiring around the
-LLM: command dispatch, skill loading, tool calls, file writes, git commits.
+LLM: command dispatch, pending-intent claiming, tool calls, file writes,
+git commits.
 """
 
 from __future__ import annotations
@@ -18,19 +21,30 @@ from types import SimpleNamespace
 
 import yaml
 
-from solomon import profile, slash, tools
+from solomon import hooks, profile, session_state, slash, tools
 
 
 def test_full_session_0_flow(solomon_home: Path):
-    # 1. Start the session.
-    session = SimpleNamespace(private=False)
-    onboard = slash.cmd_onboard({}, session)
-    assert onboard["session_n"] == 0
-    assert "MODE: onboarding" in onboard["system_prompt"]
-    assert "business_category" in onboard["system_prompt"]
+    # 1. Owner types /onboard. Handler returns text and pushes a pending intent.
+    out = slash.cmd_onboard("")
+    assert "session 0" in out
+    assert "Industry & sector" in out
 
-    # 2. The scripted "LLM" reads the system prompt and eventually decides to
-    #    finalize the session (this is the moment that matters for the wiring).
+    # 2. Owner's next message in this Hermes session. pre_llm_call fires,
+    #    claims the intent, sets onboarding mode for the session.
+    block = hooks.pre_llm_call(
+        session_id="hermes-sess-1",
+        user_message="I run a small real estate law firm.",
+        conversation_history=[],
+        is_first_turn=True,
+        model="claude-sonnet-4-6",
+        platform="cli",
+    )
+    assert block is not None
+    assert "MODE: onboarding" in block["context"]
+    assert "business_category" in block["context"]
+
+    # 3. The scripted "LLM" eventually calls mark_session_complete.
     summary_payload = {
         "business_category": "real estate law",
         "primary_product_or_service": "residential title closings and small commercial work",
@@ -42,22 +56,24 @@ def test_full_session_0_flow(solomon_home: Path):
     }
     assert tools.mark_session_complete(0, summary_payload) is True
 
-    # 3. profile.yaml is filled, git tracked it, last_updated is set.
+    # 4. profile.yaml is filled.
     data = yaml.safe_load((solomon_home / "profile.yaml").read_text())
     assert data["industry"]["filled"] is True
     assert data["industry"]["business_category"] == "real estate law"
     assert data["meta"]["last_updated"]
 
-    # 4. /status shows 1 of 7 complete.
-    status = slash.cmd_status({}, None)
-    assert "1 of 7 complete" in status["message"]
-    assert "✓ 0" in status["message"]
+    # 5. /status shows 1 of 7 complete.
+    status_text = slash.cmd_status("")
+    assert "1 of 7 complete" in status_text
+    assert "✓ 0" in status_text
 
-    # 5. The next /onboard call advances to session 1.
-    session2 = SimpleNamespace(private=False)
-    onboard2 = slash.cmd_onboard({}, session2)
-    assert onboard2["session_n"] == 1
-    assert "Belief system" in onboard2["message"]
+    # 6. The next /onboard call advances to session 1.
+    out2 = slash.cmd_onboard("")
+    assert "session 1" in out2
+    assert "Belief system" in out2
+    # And the next turn's intent is for session 1.
+    intent = session_state.claim_pending_intent("hermes-sess-2")
+    assert intent["session_n"] == 1
 
 
 def test_full_proactive_inbound_flow(solomon_home: Path):

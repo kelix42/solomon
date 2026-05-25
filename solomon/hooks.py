@@ -181,6 +181,29 @@ def pre_llm_call(*, session_id: str = "", user_message: Any = None,
     """
     if _solomon_off():
         return None
+
+    # Claim any pending intent left by a slash handler in this conversation.
+    # Slash handlers don't get a session_id; this is how the intent reaches
+    # the correct session.
+    pending = session_state.claim_pending_intent(session_id)
+    if pending:
+        intent = pending.get("intent")
+        if intent == "onboarding":
+            session_state.set_active_mode(
+                session_id, "onboarding",
+                session_n=pending.get("session_n"),
+            )
+        elif intent == "mentoring":
+            session_state.set_active_mode(
+                session_id, "mentoring",
+                queue_count=pending.get("queue_count"),
+                action_count=pending.get("action_count"),
+            )
+        elif intent == "private_on":
+            session_state.mark_private(session_id)
+        elif intent == "private_off":
+            session_state.unmark_private(session_id)
+
     if session_state.is_private(session_id):
         # The conversation continues; Solomon just doesn't inject anything.
         # Daily reflection will skip this session entirely.

@@ -1,25 +1,31 @@
-"""Tests for slash command handlers."""
+"""Tests for slash command handlers — real Hermes signature."""
 
 from __future__ import annotations
 
 from pathlib import Path
-from types import SimpleNamespace
 
-from solomon import profile, slash
-
-
-def test_onboard_first_run_returns_session_0(solomon_home: Path):
-    session = SimpleNamespace(private=False)
-    result = slash.cmd_onboard({}, session)
-    assert result["ok"]
-    assert result["session_n"] == 0
-    assert "session 0" in result["message"]
-    assert session.solomon_skill_overridden is True
-    assert "MODE: onboarding" in result["system_prompt"]
-    assert "business_category" in result["system_prompt"]
+from solomon import profile, session_state, slash
 
 
-def test_onboard_skips_to_next_unfilled(solomon_home: Path):
+# ---------------------------------------------------------------------------
+# /onboard
+# ---------------------------------------------------------------------------
+
+
+def test_onboard_returns_text_and_pushes_intent(solomon_home: Path):
+    profile.init_solomon_home()
+    out = slash.cmd_onboard("")
+    assert isinstance(out, str)
+    assert "session 0" in out
+    assert "Industry & sector" in out
+    # The next pre_llm_call should be able to claim this intent.
+    intent = session_state.claim_pending_intent("sess-x")
+    assert intent is not None
+    assert intent["intent"] == "onboarding"
+    assert intent["session_n"] == 0
+
+
+def test_onboard_advances_after_session_0_filled(solomon_home: Path):
     profile.init_solomon_home()
     profile.write_session_summary(0, {
         "business_category": "x", "primary_product_or_service": "x",
@@ -27,34 +33,75 @@ def test_onboard_skips_to_next_unfilled(solomon_home: Path):
         "revenue_model": "project", "growth_stage": "early",
         "concentration_risk": "low",
     })
-    session = SimpleNamespace(private=False)
-    result = slash.cmd_onboard({}, session)
-    assert result["session_n"] == 1
+    out = slash.cmd_onboard("")
+    assert "session 1" in out
+    intent = session_state.claim_pending_intent("s")
+    assert intent["session_n"] == 1
 
 
-def test_onboard_all_done_message(solomon_home: Path):
+def test_onboard_all_done(solomon_home: Path):
     profile.init_solomon_home()
     # Fill all 7 sessions.
     for n, fields in profile.SESSION_REQUIRED_FIELDS.items():
-        summary = {f: ("x" if isinstance(f, str) else "") for f in fields}
-        # Fill list-typed fields with actual lists.
-        for f in ("core_beliefs", "what_they_reject", "not_for",
-                  "decision_principles", "trade_off_principles", "rules", "list"):
-            if f in summary:
-                summary[f] = ["x"] if f != "list" else [{"name": "x", "autonomy": "watch"}]
-        if "preferred_channel" in fields:
-            summary["preferred_channel"] = "telegram"
+        summary = {}
+        for f in fields:
+            if f in ("core_beliefs", "what_they_reject", "not_for",
+                      "decision_principles", "trade_off_principles"):
+                summary[f] = ["x"]
+            elif f == "rules":
+                summary[f] = [{"rule": "x", "why": "y"}]
+            elif f == "list":
+                summary[f] = [{"name": "x", "autonomy": "watch"}]
+            else:
+                summary[f] = "x"
         profile.write_session_summary(n, summary)
-    result = slash.cmd_onboard({}, SimpleNamespace(private=False))
-    assert "complete" in result["message"]
-    assert result["system_prompt"] is None
+    out = slash.cmd_onboard("")
+    assert "complete" in out
+
+
+# ---------------------------------------------------------------------------
+# /mentor
+# ---------------------------------------------------------------------------
+
+
+def test_mentor_empty_queue(solomon_home: Path):
+    profile.init_solomon_home()
+    out = slash.cmd_mentor("")
+    assert "Nothing in your queue" in out
+    # Still pushes the intent so the next turn enters mentoring mode.
+    intent = session_state.claim_pending_intent("s")
+    assert intent["intent"] == "mentoring"
+
+
+def test_mentor_with_pending_items(solomon_home: Path):
+    profile.init_solomon_home()
+    profile.append_review_item({"kind": "addition", "file": "finance",
+                                  "section": "x", "content": "y", "reason": "z"})
+    out = slash.cmd_mentor("")
+    assert "review item" in out
+
+
+def test_mentor_with_ignored_actions(solomon_home: Path):
+    profile.init_solomon_home()
+    profile.append_action_item({
+        "source_kind": "email", "source_id": "<m1>",
+        "source_summary": "x", "urgency": "low",
+        "action_kind": "draft_reply", "nudge_count": 3,
+    })
+    out = slash.cmd_mentor("")
+    assert "ignoring" in out
+
+
+# ---------------------------------------------------------------------------
+# /status — no pending intent, just text
+# ---------------------------------------------------------------------------
 
 
 def test_status_first_run(solomon_home: Path):
-    result = slash.cmd_status({}, None)
-    assert result["ok"]
-    assert "0 of 7 complete" in result["message"]
-    assert "/onboard" in result["message"]
+    profile.init_solomon_home()
+    out = slash.cmd_status("")
+    assert "0 of 7 complete" in out
+    assert "/onboard" in out
 
 
 def test_status_after_session_0(solomon_home: Path):
@@ -65,8 +112,8 @@ def test_status_after_session_0(solomon_home: Path):
         "revenue_model": "project", "growth_stage": "early",
         "concentration_risk": "low",
     })
-    result = slash.cmd_status({}, None)
-    assert "1 of 7 complete" in result["message"]
+    out = slash.cmd_status("")
+    assert "1 of 7 complete" in out
 
 
 def test_status_shows_pending_actions(solomon_home: Path):
@@ -76,63 +123,69 @@ def test_status_shows_pending_actions(solomon_home: Path):
         "source_summary": "vendor question", "urgency": "high",
         "action_kind": "draft_reply",
     })
-    result = slash.cmd_status({}, None)
-    assert "Pending actions: 1" in result["message"]
-    assert "1 high" in result["message"]
+    out = slash.cmd_status("")
+    assert "Pending actions: 1" in out
+    assert "1 high" in out
 
 
-def test_private_toggle(solomon_home: Path):
-    session = SimpleNamespace(private=False, id="s1")
-    r1 = slash.cmd_private({}, session)
-    assert session.private is True
-    assert "is on" in r1["message"]
-    r2 = slash.cmd_private({}, session)
-    assert session.private is False
-    assert "is off" in r2["message"]
+# ---------------------------------------------------------------------------
+# /private + /endprivate
+# ---------------------------------------------------------------------------
+
+
+def test_private_pushes_intent(solomon_home: Path):
+    profile.init_solomon_home()
+    out = slash.cmd_private("")
+    assert "Private mode" in out
+    intent = session_state.claim_pending_intent("s")
+    assert intent["intent"] == "private_on"
+
+
+def test_endprivate_pushes_intent(solomon_home: Path):
+    profile.init_solomon_home()
+    out = slash.cmd_endprivate("")
+    assert "Private mode" in out
+    intent = session_state.claim_pending_intent("s")
+    assert intent["intent"] == "private_off"
+
+
+# ---------------------------------------------------------------------------
+# /solomon-off + /solomon-on
+# ---------------------------------------------------------------------------
 
 
 def test_solomon_off_creates_sentinel(solomon_home: Path):
-    slash.cmd_solomon_off({}, None)
+    profile.init_solomon_home()
+    out = slash.cmd_solomon_off("")
     assert (solomon_home / ".solomon_off").exists()
+    assert "suspended" in out
 
 
 def test_solomon_on_removes_sentinel(solomon_home: Path):
-    slash.cmd_solomon_off({}, None)
-    slash.cmd_solomon_on({}, None)
+    profile.init_solomon_home()
+    slash.cmd_solomon_off("")
+    out = slash.cmd_solomon_on("")
     assert not (solomon_home / ".solomon_off").exists()
+    assert "active again" in out
 
 
-def test_mentor_with_empty_queue(solomon_home: Path):
-    profile.init_solomon_home()
-    session = SimpleNamespace(private=False)
-    result = slash.cmd_mentor({}, session)
-    assert result["ok"]
-    assert "Nothing in your queue" in result["message"]
-    assert session.solomon_skill_overridden is True
-
-
-def test_mentor_with_items(solomon_home: Path):
-    profile.init_solomon_home()
-    profile.append_review_item({"kind": "addition", "file": "finance",
-                                  "section": "Test", "content": "x",
-                                  "reason": "test"})
-    profile.append_action_item({
-        "source_kind": "email", "source_id": "<m1>",
-        "source_summary": "x", "urgency": "low",
-        "action_kind": "draft_reply", "nudge_count": 3,
-    })
-    result = slash.cmd_mentor({}, SimpleNamespace(private=False))
-    assert "review item" in result["message"]
-    assert "ignoring" in result["message"]
+# ---------------------------------------------------------------------------
+# /ingest empty inbox
+# ---------------------------------------------------------------------------
 
 
 def test_ingest_empty_inbox(solomon_home: Path):
     profile.init_solomon_home()
-    result = slash.cmd_ingest({}, None)
-    assert "Inbox is empty" in result["message"]
+    out = slash.cmd_ingest("")
+    assert "Inbox is empty" in out
 
 
-def test_register_all_calls_adapter(solomon_home: Path):
+# ---------------------------------------------------------------------------
+# Registration + error wrapping
+# ---------------------------------------------------------------------------
+
+
+def test_register_all_uses_hermes_signature(solomon_home: Path):
     calls = []
 
     class FakeAdapter:
@@ -140,24 +193,22 @@ def test_register_all_calls_adapter(solomon_home: Path):
             calls.append((name, handler))
 
     slash.register_all(FakeAdapter())
-    names = [c[0] for c in calls]
-    assert set(names) == {
-        "onboard", "mentor", "status", "private",
-        "reflect", "ingest", "solomon-off", "solomon-on",
-    }
+    names = {c[0] for c in calls}
+    assert names == {"onboard", "mentor", "status", "private", "endprivate",
+                      "reflect", "ingest", "solomon-off", "solomon-on"}
+    # Every handler accepts a raw string and returns a string (or None).
+    for _, h in calls:
+        result = h("")
+        assert result is None or isinstance(result, str)
 
 
-def test_handler_swallows_exceptions(solomon_home: Path):
-    """Handlers wrap their inner function in try/except so errors don't crash Hermes."""
-    calls = []
+def test_wrapped_handler_swallows_exceptions(solomon_home: Path):
+    """If an inner handler raises, the wrapper returns a user-facing
+    string and logs the error. Exception does not escape to Hermes."""
+    def boom(raw):
+        raise RuntimeError("kaboom")
 
-    class FakeAdapter:
-        def register_command(self, *, name, description, handler):
-            calls.append(handler)
-
-    slash.register_all(FakeAdapter())
-    # The status handler should never raise.
-    for h in calls:
-        result = h({})
-        # All handlers either return ok=True or ok=False with a message.
-        assert "ok" in result
+    wrapped = slash._wrap_handler(boom)
+    out = wrapped("")
+    assert isinstance(out, str)
+    assert "error" in out.lower()

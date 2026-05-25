@@ -1,33 +1,32 @@
-"""Slash command handlers.
+"""Slash command handlers — real Hermes signature.
 
-Eight commands total:
-  /onboard       — continue the next foundation interview
-  /mentor        — weekly review with active probing
-  /status        — plain printout (no LLM)
-  /private       — toggle private mode for the conversation
-  /reflect       — run daily.py now
-  /ingest        — process the inbox now
-  /solomon-off   — global suspend
-  /solomon-on    — resume
+Hermes invokes each handler with a raw args string and expects a `str | None`
+response. The response IS the text shown to the owner. The LLM is NOT
+involved in producing that response.
 
-Most handlers return a structured response. The LLM-driven commands
-(/onboard, /mentor) load the interview skill and let Hermes do the
-talking. Pure-text commands (/status, /private, etc.) return strings
-directly.
+For commands that need to start an LLM-driven session (/onboard, /mentor,
+/private, /endprivate), the handler writes a "pending intent" via
+session_state.push_pending_intent(). The next pre_llm_call claims it and
+sets the active mode for the owner's session — see hooks.pre_llm_call.
+
+Eight commands registered:
+  /onboard       /mentor       /status       /private
+  /endprivate    /reflect      /ingest       /solomon-off  /solomon-on
+
+(That is nine. `/endprivate` is the symmetrical undo of `/private`. The
+plan called them out as eight "primary" commands plus the on/off pair;
+implementation lists them all.)
 """
 
 from __future__ import annotations
 
-import re
-from datetime import datetime, timezone
+from datetime import datetime
 from pathlib import Path
-from typing import Any, Optional
+from typing import Optional
 
 import yaml
 
-from . import logs, profile
-
-SKILL_DIR = Path(__file__).parent / "skills"
+from . import logs, profile, session_state
 
 
 # ---------------------------------------------------------------------------
@@ -35,26 +34,38 @@ SKILL_DIR = Path(__file__).parent / "skills"
 # ---------------------------------------------------------------------------
 
 
-def _load_interview_skill_body() -> str:
-    text = (SKILL_DIR / "solomon-interview.md").read_text(encoding="utf-8")
-    if text.startswith("---"):
-        end = text.find("\n---\n", 3)
-        if end != -1:
-            text = text[end + 5 :]
-    return text.strip()
-
-
 def _next_unfilled_session() -> Optional[int]:
     """Return the lowest session number (0-6) that isn't yet filled."""
     data = yaml.safe_load((profile.home() / "profile.yaml").read_text())
     for n, section in profile.SESSION_SECTION.items():
-        if not data.get(section, {}).get("filled"):
+        if not (data.get(section, {}) or {}).get("filled"):
             return n
     return None
 
 
-def _required_fields_for(session_n: int) -> tuple[str, ...]:
-    return profile.SESSION_REQUIRED_FIELDS[session_n]
+def _last_activity_ts() -> Optional[str]:
+    log_file = logs.log_path()
+    if not log_file.exists():
+        return None
+    last = ""
+    import json
+    try:
+        for line in log_file.read_text(encoding="utf-8").splitlines():
+            try:
+                entry = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if entry.get("event") == "turn_end":
+                last = entry.get("ts", "")
+    except Exception:  # noqa: BLE001
+        return None
+    if not last:
+        return None
+    try:
+        dt = datetime.fromisoformat(last.replace("Z", "+00:00"))
+        return dt.strftime("%Y-%m-%d %H:%M")
+    except ValueError:
+        return last
 
 
 # ---------------------------------------------------------------------------
@@ -62,45 +73,21 @@ def _required_fields_for(session_n: int) -> tuple[str, ...]:
 # ---------------------------------------------------------------------------
 
 
-def cmd_onboard(args: dict, session: Any = None) -> dict:
-    """Open an onboarding conversation for the next unfilled session."""
+def cmd_onboard(raw_args: str) -> str:
+    """Continue the foundation interview. Args ignored (we always pick the next unfilled session)."""
     profile.init_solomon_home()
     n = _next_unfilled_session()
     if n is None:
-        return {
-            "ok": True,
-            "system_prompt": None,
-            "message": (
-                "All seven foundation sessions are complete. Your profile "
-                "is filled. Use /mentor to deepen specific areas."
-            ),
-        }
-    fields = _required_fields_for(n)
-    skill_body = _load_interview_skill_body()
-    addendum = (
-        f"\n\n# Active mode\n\nMODE: onboarding\n"
-        f"SESSION: {n} ({profile.SESSION_NAMES[n]})\n"
-        f"REQUIRED FIELDS: {', '.join(fields)}\n"
-        f"SESSION SCHEMA: see profile.yaml.{profile.SESSION_SECTION[n]} section. "
-        f"Each field maps to a key in the dict you pass to mark_session_complete."
+        return ("All seven foundation sessions are complete. Your profile is "
+                "filled. Use /mentor to deepen specific areas.")
+    session_state.push_pending_intent("onboarding", session_n=n)
+    name = profile.SESSION_NAMES[n]
+    return (
+        f"Starting session {n} — {name}. I'll ask one question at a time. "
+        "Take your time. Stop any time; the next /onboard picks up where we "
+        "left off.\n\n"
+        "Reply to this with whatever you want to say first."
     )
-    if session is not None:
-        try:
-            session.solomon_skill_overridden = True
-        except Exception:  # noqa: BLE001
-            pass
-    logs.log("skill_loaded", skill="solomon-interview",
-             context={"mode": "onboarding", "session_n": n})
-    return {
-        "ok": True,
-        "system_prompt": skill_body + addendum,
-        "message": (
-            f"Starting onboarding session {n} — {profile.SESSION_NAMES[n]}. "
-            "I'll ask one question at a time. Take your time. "
-            "Stop any time; the next /onboard picks up where we left off."
-        ),
-        "session_n": n,
-    }
 
 
 # ---------------------------------------------------------------------------
@@ -108,72 +95,41 @@ def cmd_onboard(args: dict, session: Any = None) -> dict:
 # ---------------------------------------------------------------------------
 
 
-def cmd_mentor(args: dict, session: Any = None) -> dict:
+def cmd_mentor(raw_args: str) -> str:
     profile.init_solomon_home()
-    review_pending = profile.read_queue("review", "pending", limit=100)
-    actions_ignored = [
-        a for a in profile.read_queue("actions", "pending", limit=100)
-        if a.get("nudge_count", 0) >= 2
-    ]
-    actions_stale = profile.read_queue("actions", "stale", limit=100)
+    review_pending = profile.read_queue("review", "pending", limit=10_000)
+    actions_pending = profile.read_queue("actions", "pending", limit=10_000)
+    actions_ignored = [a for a in actions_pending if a.get("nudge_count", 0) >= 2]
+    actions_stale = profile.read_queue("actions", "stale", limit=10_000)
 
-    skill_body = _load_interview_skill_body()
-    addendum = (
-        f"\n\n# Active mode\n\nMODE: mentoring\n"
-        f"REVIEW QUEUE PENDING: {len(review_pending)}\n"
-        f"ACTIONS IGNORED (nudge_count >= 2): {len(actions_ignored)}\n"
-        f"ACTIONS STALE: {len(actions_stale)}\n\n"
-        "Walk stale + ignored actions first, then the review queue, "
-        "then ask one hypothetical, then probe one gap. Use "
-        "apply_queue_decision to act on each item."
+    session_state.push_pending_intent(
+        "mentoring",
+        queue_count=len(review_pending),
+        action_count=len(actions_ignored) + len(actions_stale),
     )
-    if session is not None:
-        try:
-            session.solomon_skill_overridden = True
-        except Exception:  # noqa: BLE001
-            pass
-    logs.log("skill_loaded", skill="solomon-interview",
-             context={"mode": "mentoring",
-                       "review_pending": len(review_pending),
-                       "ignored_actions": len(actions_ignored),
-                       "stale_actions": len(actions_stale)})
 
     total = len(review_pending) + len(actions_ignored) + len(actions_stale)
     if total == 0:
-        opener = (
-            "Nothing in your queue right now. Want me to ask a hypothetical "
-            "or probe one of the thin sections in your profile?"
-        )
-    else:
-        bits = []
-        if actions_stale:
-            bits.append(f"{len(actions_stale)} stale action(s)")
-        if actions_ignored:
-            bits.append(f"{len(actions_ignored)} pending action(s) you've been ignoring")
-        if review_pending:
-            bits.append(f"{len(review_pending)} review item(s)")
-        opener = (
-            f"I have {' + '.join(bits)} to go through. Want to start with the "
-            "actions or the captures?"
-        )
-    return {
-        "ok": True,
-        "system_prompt": skill_body + addendum,
-        "message": opener,
-        "context": {
-            "review_pending": review_pending,
-            "actions_ignored": actions_ignored,
-            "actions_stale": actions_stale,
-        },
-    }
+        return ("Nothing in your queue right now. Reply to this and we can "
+                "talk through a hypothetical or probe a thin section of your "
+                "profile.")
+    bits = []
+    if actions_stale:
+        bits.append(f"{len(actions_stale)} stale action(s)")
+    if actions_ignored:
+        bits.append(f"{len(actions_ignored)} pending action(s) you've been ignoring")
+    if review_pending:
+        bits.append(f"{len(review_pending)} review item(s)")
+    return (f"I have {' + '.join(bits)} to walk through. Want to start with "
+            "the actions or the captures?")
 
 
 # ---------------------------------------------------------------------------
-# /status — pure text, no LLM
+# /status — no LLM, no pending intent, just text
 # ---------------------------------------------------------------------------
 
 
-def cmd_status(args: dict, session: Any = None) -> dict:
+def cmd_status(raw_args: str) -> str:
     profile.init_solomon_home()
     data = yaml.safe_load((profile.home() / "profile.yaml").read_text())
 
@@ -181,7 +137,7 @@ def cmd_status(args: dict, session: Any = None) -> dict:
     filled_count = 0
     for n in range(7):
         section = profile.SESSION_SECTION[n]
-        sect = data.get(section, {})
+        sect = data.get(section, {}) or {}
         name = profile.SESSION_NAMES[n]
         if sect.get("filled"):
             filled_count += 1
@@ -206,29 +162,31 @@ def cmd_status(args: dict, session: Any = None) -> dict:
     lines.extend(sessions_lines)
     lines.append("")
 
-    # Actions
     if actions_pending or actions_stale:
         by_urg = {"high": 0, "medium": 0, "low": 0}
         for a in actions_pending:
             by_urg[a.get("urgency", "low")] = by_urg.get(a.get("urgency", "low"), 0) + 1
-        lines.append(
+        line = (
             f"Pending actions: {len(actions_pending)} pending "
             f"({by_urg['high']} high, {by_urg['medium']} medium, {by_urg['low']} low)"
-            + (f", {len(actions_stale)} stale" if actions_stale else "")
         )
-        # Show up to 3 highest-urgency pending items.
-        prioritized = sorted(actions_pending,
-                              key=lambda a: {"high": 0, "medium": 1, "low": 2}.get(a.get("urgency", "low"), 3))
+        if actions_stale:
+            line += f", {len(actions_stale)} stale"
+        lines.append(line)
+        prioritized = sorted(
+            actions_pending,
+            key=lambda a: {"high": 0, "medium": 1, "low": 2}.get(a.get("urgency", "low"), 3),
+        )
         for a in prioritized[:3]:
             ts = a.get("ts", "")
             short_ts = ts.split("T")[0] if ts else "?"
             urg = a.get("urgency", "low").upper()
             summary = (a.get("source_summary") or "?")[:60]
-            lines.append(f"  - {urg:<4} {summary}  (proposed {short_ts}, nudged {a.get('nudge_count', 0)}x)")
+            lines.append(f"  - {urg:<6} {summary}  (proposed {short_ts}, nudged {a.get('nudge_count', 0)}x)")
         if len(actions_pending) > 3:
             lines.append(f"  ... and {len(actions_pending) - 3} more — type /mentor to walk through them")
         if actions_stale:
-            lines.append("Run /mentor to address stale items so Solomon can resume nudging.")
+            lines.append("Run /mentor to address stale items.")
         lines.append("")
 
     lines.append(f"Review queue: {len(review_pending)} pending")
@@ -241,79 +199,45 @@ def cmd_status(args: dict, session: Any = None) -> dict:
     else:
         lines.append("Type /mentor when you're ready to walk through pending items.")
 
-    return {"ok": True, "system_prompt": None, "message": "\n".join(lines)}
-
-
-def _last_activity_ts() -> Optional[str]:
-    log_file = logs.log_path()
-    if not log_file.exists():
-        return None
-    last = ""
-    import json
-    try:
-        for line in log_file.read_text(encoding="utf-8").splitlines():
-            try:
-                entry = json.loads(line)
-            except json.JSONDecodeError:
-                continue
-            if entry.get("event") == "turn_end":
-                last = entry.get("ts", "")
-    except Exception:  # noqa: BLE001
-        return None
-    if not last:
-        return None
-    # Render as YYYY-MM-DD HH:MM.
-    try:
-        dt = datetime.fromisoformat(last.replace("Z", "+00:00"))
-        return dt.strftime("%Y-%m-%d %H:%M")
-    except ValueError:
-        return last
+    return "\n".join(lines)
 
 
 # ---------------------------------------------------------------------------
-# /private — toggle
+# /private and /endprivate — pending intent for next turn
 # ---------------------------------------------------------------------------
 
 
-def cmd_private(args: dict, session: Any = None) -> dict:
-    current = bool(getattr(session, "private", False)) if session else False
-    new = not current
-    if session is not None:
-        try:
-            session.private = new
-        except Exception:  # noqa: BLE001
-            pass
-    if new:
-        logs.log("private_activated", session_id=getattr(session, "id", None))
-        msg = ("Private mode is on for this conversation. Nothing said from "
-               "here on will be logged, learned from, or added to the review "
-               "queue. This conversation will not appear in tomorrow's "
-               "reflection. Type /private again to turn it back off.")
-    else:
-        logs.log("private_deactivated", session_id=getattr(session, "id", None))
-        msg = ("Private mode is off. From this point forward in this "
-               "conversation, Solomon is loaded and learning resumes. "
-               "The turns that happened in private mode remain unlogged.")
-    return {"ok": True, "system_prompt": None, "message": msg}
+def cmd_private(raw_args: str) -> str:
+    session_state.push_pending_intent("private_on")
+    return ("Private mode will turn on for this conversation starting with "
+            "your next message. Nothing said from here on will be logged, "
+            "learned from, or added to the review queue. Type /endprivate to "
+            "turn it back off.")
+
+
+def cmd_endprivate(raw_args: str) -> str:
+    session_state.push_pending_intent("private_off")
+    return ("Private mode will turn off starting with your next message. "
+            "Solomon resumes loading the role and learning. Anything said "
+            "during private mode remains unlogged.")
 
 
 # ---------------------------------------------------------------------------
-# /reflect — run daily.py now
+# /reflect — run daily now (manual override)
 # ---------------------------------------------------------------------------
 
 
-def cmd_reflect(args: dict, session: Any = None) -> dict:
+def cmd_reflect(raw_args: str) -> str:
     from . import daily
-    result = daily.run(adapter=getattr(session, "adapter", None))
-    msg = (
-        f"Reflection complete.\n"
+    result = daily.run_now()
+    return (
+        "Reflection complete.\n"
         f"  Conversation batches processed: {result.get('batches', 0)}\n"
         f"  Documents ingested: {result.get('files', 0)}\n"
         f"  Proposals added: {result.get('proposals', 0)}\n"
         f"  Nudges sent: {result.get('nudges_sent', 0)}\n"
         f"  Actions marked stale: {result.get('actions_stale', 0)}"
     )
-    return {"ok": True, "system_prompt": None, "message": msg}
 
 
 # ---------------------------------------------------------------------------
@@ -321,24 +245,20 @@ def cmd_reflect(args: dict, session: Any = None) -> dict:
 # ---------------------------------------------------------------------------
 
 
-def cmd_ingest(args: dict, session: Any = None) -> dict:
-    from . import ingest
-    adapter = getattr(session, "adapter", None)
+def cmd_ingest(raw_args: str) -> str:
+    profile.init_solomon_home()
     inbox = profile.home() / "inbox"
     if not inbox.exists() or not any(inbox.iterdir()):
-        return {
-            "ok": True,
-            "system_prompt": None,
-            "message": ("Inbox is empty. Drop files into ~/.hermes/solomon/inbox/ "
-                         "first, then run /ingest again."),
-        }
-    summary = ingest.process_all(adapter=adapter)
+        return ("Inbox is empty. Drop files into ~/.hermes/solomon/inbox/ "
+                "first, then run /ingest again.")
+    from . import ingest
+    summary = ingest.process_all()
     lines = ["Ingest complete."]
     lines.append(f"  Files processed: {summary['ok']}")
-    if summary['failed']:
+    if summary.get("failed"):
         lines.append(f"  Files failed: {summary['failed']} (see archive/failed/)")
-    lines.append(f"  Proposals added: {summary['proposals']}")
-    return {"ok": True, "system_prompt": None, "message": "\n".join(lines)}
+    lines.append(f"  Proposals added: {summary.get('proposals', 0)}")
+    return "\n".join(lines)
 
 
 # ---------------------------------------------------------------------------
@@ -346,36 +266,24 @@ def cmd_ingest(args: dict, session: Any = None) -> dict:
 # ---------------------------------------------------------------------------
 
 
-def cmd_solomon_off(args: dict, session: Any = None) -> dict:
+def cmd_solomon_off(raw_args: str) -> str:
     profile.init_solomon_home()
     (profile.home() / ".solomon_off").touch()
     logs.log("solomon_suspended")
-    return {
-        "ok": True,
-        "system_prompt": None,
-        "message": (
-            "Solomon is globally suspended. Hermes is now running without the "
-            "Solomon role until you type /solomon-on. Pending learning "
+    return ("Solomon is globally suspended. Hermes is now running without "
+            "the Solomon role until you type /solomon-on. Pending learning "
             "continues to be captured in the review queue but no system-prompt "
-            "injection happens on Hermes turns."
-        ),
-    }
+            "injection happens on Hermes turns.")
 
 
-def cmd_solomon_on(args: dict, session: Any = None) -> dict:
+def cmd_solomon_on(raw_args: str) -> str:
     profile.init_solomon_home()
     sentinel = profile.home() / ".solomon_off"
     if sentinel.exists():
         sentinel.unlink()
     logs.log("solomon_resumed")
-    return {
-        "ok": True,
-        "system_prompt": None,
-        "message": (
-            "Solomon is active again. The next Hermes turn will be loaded "
-            "with the Solomon role."
-        ),
-    }
+    return ("Solomon is active again. The next Hermes turn will be loaded "
+            "with the Solomon role.")
 
 
 # ---------------------------------------------------------------------------
@@ -386,7 +294,8 @@ COMMANDS = {
     "onboard": (cmd_onboard, "Start or continue the foundation interview."),
     "mentor": (cmd_mentor, "Walk through pending items and probe gaps."),
     "status": (cmd_status, "Show progress: foundation sessions, pending actions, inbox."),
-    "private": (cmd_private, "Toggle private mode for this conversation."),
+    "private": (cmd_private, "Turn private mode on for this conversation."),
+    "endprivate": (cmd_endprivate, "Turn private mode off."),
     "reflect": (cmd_reflect, "Run nightly reflection now."),
     "ingest": (cmd_ingest, "Process documents in ~/.hermes/solomon/inbox/ now."),
     "solomon-off": (cmd_solomon_off, "Globally suspend Solomon."),
@@ -394,17 +303,25 @@ COMMANDS = {
 }
 
 
-def register_all(adapter) -> None:  # noqa: ANN001
+def register_all(adapter_obj) -> None:  # noqa: ANN001
     for name, (fn, desc) in COMMANDS.items():
-        adapter.register_command(name=name, description=desc, handler=_make_handler(fn))
+        adapter_obj.register_command(
+            name=name, description=desc, handler=_wrap_handler(fn),
+        )
 
 
-def _make_handler(fn):
-    def handler(args: dict, session=None) -> Any:
+def _wrap_handler(fn):
+    """Wrap a handler so exceptions become a user-facing error string.
+
+    Hermes catches plugin exceptions, but we'd rather show the owner a
+    plain message + a doctor hint than have the slash command just go quiet.
+    """
+    def handler(raw_args: str) -> Optional[str]:
         try:
-            return fn(args, session)
+            return fn(raw_args)
         except Exception as e:  # noqa: BLE001
             logs.log_error("error", e, where=f"slash.{fn.__name__}")
-            return {"ok": False, "message": f"Sorry — that command hit an error. Run `solomon logs --errors --today` for details."}
+            return ("Sorry — that command hit an error. Run "
+                    "`solomon logs --errors --today` for details.")
     handler.__name__ = fn.__name__
     return handler
