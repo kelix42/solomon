@@ -18,10 +18,23 @@ Each item: **what** / **source** / **state**.
 
 ### High priority
 
-- **Verify Hermes API names against a real running Hermes.** [open]
-  - Names used in `adapter.py`: `pre_llm_call`, `post_llm_call`, `on_session_start` hooks; `register(ctx)` entry-point; `plugins.enabled` config key.
-  - Source: walkthrough Q2, 2026-05-25.
-  - Why it matters: if any name is wrong, the plugin loads silently but tools/commands/hooks never fire. Easy to spot once we load Solomon into live Hermes. Only `adapter.py` needs the fix.
+- **Hermes plugin contract mismatches.** [open — verified against live Hermes 2026-05-25]
+
+  Confirmed against `~/.hermes/hermes-agent/` source. These are real bugs that prevent Solomon from loading or functioning:
+
+  1. **Missing `plugin.yaml` manifest.** `hermes_cli/plugins.py:19` requires every directory plugin to have one. The pip entry-point path may work without it, but the canonical shape includes one. Add: `solomon/plugin.yaml` with name/version/description/hooks list.
+  2. **`register_tool` signature wrong** ([adapter.py:31-44](solomon/adapter.py#L31-L44)). Hermes signature is `register_tool(name, toolset, schema, handler, ...)`. Our adapter passes `parameters=` (Hermes uses `schema=`) and never passes `toolset` (required, no default). Need to pick a toolset name like `"solomon"` for all our tools.
+  3. **`register_command` handler signature wrong** ([slash.py](solomon/slash.py)). Hermes calls `handler(raw_args: str) -> str | None`. Our handlers take `(args: dict, session=None)` and return a dict with `system_prompt`/`message` keys. The `system_prompt` field is completely ignored by Hermes. Need to: (a) accept raw_args string, (b) return just the response text, (c) move system-prompt injection out of slash handlers into pre_llm_call.
+  4. **Hook callback signature wrong** ([hooks.py](solomon/hooks.py)). Hermes invocation: `pre_llm_call(*, session_id, user_message, conversation_history, is_first_turn, model, platform, **_)`. Our `pre_llm_call(messages, session)` won't even bind.
+  5. **Context injection model is different** (`hermes_cli/plugins.py:1495-1529`). Hermes hooks **return** context, they don't mutate a messages list. Return value `{"context": "..."}` or a plain string is injected into the **user message** (not the system prompt — for prompt-cache preservation). This is arguably cleaner than our design; we need to switch to it.
+
+- **No public Hermes API for gateway-initiated messages.** [open — verified 2026-05-25]
+  - The proactive notification flow ([inbound.dispatch_pending_notifications](solomon/inbound.py)) and the weekly check-in cron ([checkin.run](solomon/checkin.py)) both need to push a message to the owner from a cron context. I searched `gateway/` and `hermes_cli/` and found only `PluginContext.inject_message()` which works in CLI but not gateway mode (per its docstring).
+  - Alternatives to investigate: (a) Hermes-side message queue we write to, (b) using `pre_gateway_dispatch` somehow, (c) accepting that proactive-from-cron is out of scope without a Hermes-side API.
+
+- **No public Hermes API for reading past conversations from outside a turn.** [open — verified 2026-05-25]
+  - The daily reflection cron ([daily.reflect_step](solomon/daily.py)) needs to read yesterday's Hermes conversations. The `conversation_history` is passed *to* the pre_llm_call hook, but I couldn't find a way for an external script (cron) to read session history.
+  - Alternatives: (a) read Hermes's SQLite session DB directly (path: `~/.hermes/sessions/` or similar — need to find it), (b) accept reflection-cron is per-turn rather than per-day, (c) Solomon maintains its own per-turn log via pre_llm_call returns.
 
 ### Medium priority
 
