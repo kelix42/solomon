@@ -180,8 +180,10 @@ def view(
     event: Optional[str] = None,
     follow: bool = False,
     extra: Optional[dict] = None,
-    out=sys.stdout,
+    out=None,
 ) -> int:
+    if out is None:
+        out = sys.stdout
     """Print log entries matching the filters. Returns count printed."""
     extra = extra or {}
     level = "ERROR" if errors_only else None
