@@ -35,7 +35,7 @@ Documentation = "https://github.com/kelix42/solomon/blob/main/SPEC.md"
 include = ["solomon*"]
 
 [tool.setuptools.package-data]
-solomon = ["skills/*.md"]
+solomon = ["skills/*.md", "plugin.yaml"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

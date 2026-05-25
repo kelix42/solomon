@@ -1,0 +1,32 @@
+name: solomon
+version: 1.0.0
+description: "Personal business brain. Turns Hermes into a specialist for one owner's business by maintaining a small set of living files the LLM reads on every turn."
+author: kelix42
+kind: standalone
+platforms:
+  - linux
+  - macos
+provides_tools:
+  - read_profile
+  - read_playbook
+  - read_queue
+  - propose_addition
+  - flag_contradiction
+  - propose_action
+  - note_handled
+  - propose_compression
+  - apply_profile_summary
+  - apply_queue_decision
+  - mark_session_complete
+  - read_conversations
+  - list_inbox
+  - read_inbox_file
+  - archive_file
+  - list_pending_actions_due_for_nudge
+  - send_nudge
+  - send_to_owner
+  - retry_pending_messages
+provides_hooks:
+  - pre_llm_call
+  - post_llm_call
+  - on_session_start

@@ -439,7 +439,7 @@ def register_all(adapter) -> None:  # noqa: ANN001
         adapter.register_tool(
             name=name,
             description=_DESCRIPTIONS[name],
-            parameters=_SCHEMAS[name],
+            schema=_SCHEMAS[name],
             handler=_make_handler(fn),
         )
 

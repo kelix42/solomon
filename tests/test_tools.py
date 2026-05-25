@@ -190,8 +190,8 @@ def test_register_all_calls_adapter(solomon_home: Path):
     calls = []
 
     class FakeAdapter:
-        def register_tool(self, *, name, description, parameters, handler):
-            calls.append((name, parameters["properties"], handler))
+        def register_tool(self, *, name, description, schema, handler):
+            calls.append((name, schema["properties"], handler))
 
     tools.register_all(FakeAdapter())
     names = [c[0] for c in calls]
