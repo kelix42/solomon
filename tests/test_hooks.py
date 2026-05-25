@@ -1,95 +1,174 @@
-"""Tests for hooks.py — system prompt injection and bypass paths."""
+"""Tests for the Hermes lifecycle hooks — real signatures + context-return."""
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
-from types import SimpleNamespace
 
-from solomon import hooks, profile
+from solomon import hooks, profile, session_state
 
 
-def test_pre_llm_call_injects_system_block(solomon_home: Path):
+# ---------------------------------------------------------------------------
+# Default-mode context injection
+# ---------------------------------------------------------------------------
+
+
+def test_pre_llm_call_returns_context_dict(solomon_home: Path):
     profile.init_solomon_home()
-    messages = [{"role": "user", "content": "hello"}]
-    session = SimpleNamespace(id="s1", private=False)
-    hooks.pre_llm_call(messages, session)
-    assert messages[0]["role"] == "system"
-    assert "Solomon role" in messages[0]["content"]
-    assert "Owner vocabulary" in messages[0]["content"]
-    assert "Profile summary" in messages[0]["content"]
-    assert "Available tools:" in messages[0]["content"]
+    result = hooks.pre_llm_call(
+        session_id="sess-1",
+        user_message="hello",
+        conversation_history=[],
+        is_first_turn=True,
+        model="claude-sonnet-4-6",
+        platform="cli",
+    )
+    assert isinstance(result, dict)
+    assert "context" in result
+    block = result["context"]
+    assert "Solomon role" in block
+    assert "Available tools" in block
 
 
-def test_pre_llm_call_skipped_when_solomon_off(solomon_home: Path):
+def test_pre_llm_call_includes_vocabulary_and_summary(solomon_home: Path):
     profile.init_solomon_home()
-    (solomon_home / ".solomon_off").touch()
-    messages = [{"role": "user", "content": "hi"}]
-    session = SimpleNamespace(id="s1", private=False)
-    hooks.pre_llm_call(messages, session)
-    assert all(m["role"] != "system" or "Solomon role" not in m["content"]
-               for m in messages)
-
-
-def test_pre_llm_call_skipped_when_private(solomon_home: Path):
-    profile.init_solomon_home()
-    messages = [{"role": "user", "content": "hi"}]
-    session = SimpleNamespace(id="s1", private=True)
-    hooks.pre_llm_call(messages, session)
-    assert len(messages) == 1  # nothing prepended
-
-
-def test_pre_llm_call_consumes_override_flag(solomon_home: Path):
-    profile.init_solomon_home()
-    messages = [{"role": "user", "content": "hi"}]
-    session = SimpleNamespace(id="s1", private=False,
-                                solomon_skill_overridden=True)
-    hooks.pre_llm_call(messages, session)
-    assert len(messages) == 1
-    assert session.solomon_skill_overridden is False
+    # Seed the vocabulary file with a phrase.
+    (solomon_home / "vocabulary.md").write_text(
+        "# Vocabulary\n\n## Phrases\n\n- 'the build sheet'\n", encoding="utf-8"
+    )
+    block = hooks.pre_llm_call(session_id="s", user_message="x",
+                                  conversation_history=[], is_first_turn=True,
+                                  model="m", platform="cli")["context"]
+    assert "the build sheet" in block
 
 
 def test_pre_llm_call_empty_profile_invites_onboard(solomon_home: Path):
     profile.init_solomon_home()
-    messages = [{"role": "user", "content": "hi"}]
-    session = SimpleNamespace(id="s1", private=False)
-    hooks.pre_llm_call(messages, session)
-    assert "/onboard" in messages[0]["content"]
+    block = hooks.pre_llm_call(session_id="s", user_message="hi",
+                                  conversation_history=[], is_first_turn=True,
+                                  model="m", platform="cli")["context"]
+    assert "/onboard" in block
 
 
-def test_pre_llm_call_detects_external_inbound(solomon_home: Path):
+# ---------------------------------------------------------------------------
+# Bypasses
+# ---------------------------------------------------------------------------
+
+
+def test_pre_llm_call_returns_none_when_solomon_off(solomon_home: Path):
     profile.init_solomon_home()
-    messages = [{
-        "role": "user",
-        "content": "from a customer",
-        "source": {"kind": "email", "id": "<m-1>", "channel": "email"},
-    }]
-    session = SimpleNamespace(id="s1", private=False)
-    hooks.pre_llm_call(messages, session)
-    assert "INBOUND CONTEXT" in messages[0]["content"]
-    assert "email" in messages[0]["content"]
+    (solomon_home / ".solomon_off").touch()
+    result = hooks.pre_llm_call(session_id="s", user_message="x",
+                                   conversation_history=[], is_first_turn=True,
+                                   model="m", platform="cli")
+    assert result is None
 
 
-def test_pre_llm_call_does_not_flag_owner_direct_message(solomon_home: Path):
+def test_pre_llm_call_returns_none_for_private_session(solomon_home: Path):
     profile.init_solomon_home()
-    messages = [{"role": "user", "content": "hello",
-                  "source": {"kind": "cli"}}]
-    session = SimpleNamespace(id="s1", private=False)
-    hooks.pre_llm_call(messages, session)
-    assert "INBOUND CONTEXT" not in messages[0]["content"]
+    session_state.mark_private("private-sess")
+    result = hooks.pre_llm_call(session_id="private-sess", user_message="x",
+                                   conversation_history=[], is_first_turn=False,
+                                   model="m", platform="telegram")
+    assert result is None
 
 
-def test_on_session_start_initializes_private_false(solomon_home: Path):
-    session = SimpleNamespace(id="s1")
-    hooks.on_session_start(session)
-    assert session.private is False
+# ---------------------------------------------------------------------------
+# Inbound detection
+# ---------------------------------------------------------------------------
 
 
-def test_post_llm_call_logs_private_turn_when_private(solomon_home: Path):
+def test_pre_llm_call_flags_inbound_for_gateway_platforms(solomon_home: Path):
     profile.init_solomon_home()
-    session = SimpleNamespace(id="s1", private=True)
-    response = SimpleNamespace(input_tokens=10, output_tokens=20)
-    hooks.post_llm_call(response, session)
-    # Reading the log: should have a private_turn entry.
-    from solomon import logs as logsmod
-    text = logsmod.log_path().read_text()
+    block = hooks.pre_llm_call(
+        session_id="s",
+        user_message={"message_id": "tg-42", "text": "vendor email"},
+        conversation_history=[], is_first_turn=False,
+        model="m", platform="telegram",
+    )["context"]
+    assert "INBOUND CONTEXT" in block
+    assert "telegram" in block
+
+
+def test_pre_llm_call_does_not_flag_cli_as_inbound(solomon_home: Path):
+    profile.init_solomon_home()
+    block = hooks.pre_llm_call(session_id="s", user_message="hi there",
+                                  conversation_history=[], is_first_turn=False,
+                                  model="m", platform="cli")["context"]
+    assert "INBOUND CONTEXT" not in block
+
+
+# ---------------------------------------------------------------------------
+# Active modes — onboarding / mentoring
+# ---------------------------------------------------------------------------
+
+
+def test_pre_llm_call_onboarding_mode_loads_interview_skill(solomon_home: Path):
+    profile.init_solomon_home()
+    session_state.set_active_mode("s", "onboarding", session_n=0)
+    block = hooks.pre_llm_call(session_id="s", user_message="my business is...",
+                                  conversation_history=[], is_first_turn=False,
+                                  model="m", platform="cli")["context"]
+    assert "MODE: onboarding" in block
+    assert "SESSION: 0" in block
+    assert "Industry & sector" in block
+    assert "business_category" in block
+
+
+def test_pre_llm_call_mentoring_mode_loads_interview_skill(solomon_home: Path):
+    profile.init_solomon_home()
+    session_state.set_active_mode("s", "mentoring", queue_count=4, action_count=2)
+    block = hooks.pre_llm_call(session_id="s", user_message="ok",
+                                  conversation_history=[], is_first_turn=False,
+                                  model="m", platform="cli")["context"]
+    assert "MODE: mentoring" in block
+    assert "REVIEW QUEUE PENDING: 4" in block
+    assert "ACTIONS NEEDING ATTENTION: 2" in block
+
+
+# ---------------------------------------------------------------------------
+# post_llm_call and on_session_start logging
+# ---------------------------------------------------------------------------
+
+
+def test_post_llm_call_logs_turn_end(solomon_home: Path):
+    profile.init_solomon_home()
+    hooks.post_llm_call(session_id="sess", model="m", platform="cli")
+    from solomon import logs
+    text = logs.log_path().read_text()
+    assert "turn_end" in text
+
+
+def test_post_llm_call_private_only_logs_private_turn(solomon_home: Path):
+    profile.init_solomon_home()
+    session_state.mark_private("priv")
+    hooks.post_llm_call(session_id="priv", model="m", platform="telegram")
+    from solomon import logs
+    text = logs.log_path().read_text()
     assert "private_turn" in text
+
+
+def test_on_session_start_logs(solomon_home: Path):
+    profile.init_solomon_home()
+    hooks.on_session_start(session_id="sess-x")
+    from solomon import logs
+    text = logs.log_path().read_text()
+    assert "session_start" in text
+
+
+# ---------------------------------------------------------------------------
+# Registration
+# ---------------------------------------------------------------------------
+
+
+def test_register_all_attaches_three_hooks(solomon_home: Path):
+    calls = []
+
+    class FakeAdapter:
+        def register_hook(self, hook_name, callback):
+            calls.append((hook_name, callback))
+
+    hooks.register_all(FakeAdapter())
+    assert [name for name, _ in calls] == [
+        "pre_llm_call", "post_llm_call", "on_session_start",
+    ]
