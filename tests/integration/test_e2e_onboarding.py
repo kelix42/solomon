@@ -76,13 +76,22 @@ def test_full_session_0_flow(solomon_home: Path):
     assert intent["session_n"] == 1
 
 
-def test_full_proactive_inbound_flow(solomon_home: Path):
+def test_full_proactive_inbound_flow(solomon_home: Path, monkeypatch):
     """An inbound email lands → propose_action → owner approves → action dispatches."""
     profile.init_solomon_home()
-    # Set a preferred channel so the notifier knows where to send.
-    data = yaml.safe_load((solomon_home / "profile.yaml").read_text())
-    data["meta"]["preferred_channel"] = "telegram"
-    (solomon_home / "profile.yaml").write_text(yaml.safe_dump(data, sort_keys=False))
+
+    from solomon import inbound, tools
+
+    class FakeAdapter:
+        def __init__(self):
+            self.sent = []
+
+        def send_to_owner(self, text, target=None):
+            self.sent.append((text, target))
+            return True
+
+    a = FakeAdapter()
+    monkeypatch.setattr(tools, "_adapter", a)
 
     # Scripted LLM "decides" to propose an action.
     iid = tools.propose_action(
@@ -101,30 +110,14 @@ def test_full_proactive_inbound_flow(solomon_home: Path):
     )
 
     # Notify the owner.
-    from solomon import inbound
-
-    class FakeAdapter:
-        def __init__(self):
-            self.sent = []
-            self.dispatched = []
-            # ctx needs a draft-reply handler for dispatch to succeed.
-            self.ctx = SimpleNamespace(
-                send_reply=lambda **kw: self.dispatched.append(("send_reply", kw)),
-            )
-
-        def send_to_owner(self, text, *, channel=None):
-            self.sent.append((text, channel))
-            return True
-
-    a = FakeAdapter()
-    sent = inbound.dispatch_pending_notifications(adapter=a)
+    sent = inbound.dispatch_pending_notifications()
     assert sent == 1
     assert a.sent  # owner got the notification
 
     # Owner replies "approve" — Solomon parses and dispatches.
     parsed = inbound.parse_owner_decision("approve")
     assert parsed == (iid, "approve", None)
-    inbound.apply_owner_decision(*parsed, adapter=a)
+    inbound.apply_owner_decision(*parsed)
 
     final = profile.find_queue_item("actions", iid)
     assert final["status"] == "dispatched"

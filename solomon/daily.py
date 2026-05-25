@@ -13,7 +13,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Optional
 
-from . import ingest, inbound, logs, profile
+from . import ingest, inbound, logs, profile, tools
 
 
 def _lock_path() -> Path:
@@ -120,17 +120,31 @@ def run(*, adapter: Optional[Any] = None,
         except Exception as e:  # noqa: BLE001
             logs.log_error("error", e, where="daily.ingest")
 
-        # 3. Nudge step on pending actions.
+        # 3. Nudge step on pending actions. Adapter is captured at register-time
+        #    by tools; if the caller passed one in, also wire it temporarily.
+        if adapter is not None:
+            tools._adapter = adapter
         try:
-            nudge = inbound.nudge_step(adapter=adapter)
-            summary["nudges_sent"] = nudge["sent"]
-            summary["actions_stale"] = nudge["stale"]
+            due = tools.list_pending_actions_due_for_nudge()
+            sent = 0
+            stale = 0
+            for item in due:
+                text = (f"Still waiting on the {item.get('action_kind', '')} for "
+                        f"{item.get('source_summary', '')}. Want to go ahead?")
+                if tools.send_nudge(item["id"], text):
+                    sent += 1
+                    # Check if it became stale on this run.
+                    refreshed = profile.find_queue_item("actions", item["id"])
+                    if refreshed and refreshed.get("status") == "stale":
+                        stale += 1
+            summary["nudges_sent"] = sent
+            summary["actions_stale"] = stale
         except Exception as e:  # noqa: BLE001
             logs.log_error("error", e, where="daily.nudge_step")
 
         # 4. Retry any pending messages.
         try:
-            summary["pending_messages_sent"] = inbound.retry_pending_messages(adapter=adapter)
+            summary["pending_messages_sent"] = tools.retry_pending_messages()
         except Exception as e:  # noqa: BLE001
             logs.log_error("error", e, where="daily.retry_pending_messages")
 

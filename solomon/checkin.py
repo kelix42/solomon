@@ -14,7 +14,7 @@ from typing import Any, Optional
 
 import yaml
 
-from . import inbound, logs, profile
+from . import logs, profile
 
 SKILL_PATH = Path(__file__).parent / "skills" / "solomon-interview.md"
 
@@ -149,7 +149,8 @@ def run(*, adapter: Optional[Any] = None) -> dict:
             sent = False
 
         if not sent:
-            inbound._queue_pending_message(text, channel)
+            from . import tools
+            tools._queue_pending_message(text, channel)
             summary["queued"] = True
             logs.log("checkin_sent", channel="queued")
         else:
