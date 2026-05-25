@@ -1,0 +1,42 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "solomon-brain"
+version = "1.0.0"
+description = "Personal business brain. Hermes plugin that turns the LLM into a specialist for one owner's business."
+readme = "README.md"
+license = {text = "MIT"}
+authors = [{name = "Solomon Project"}]
+requires-python = ">=3.10"
+dependencies = [
+    "PyYAML>=6.0",
+    "click>=8.1",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.4",
+    "pytest-asyncio>=0.21",
+]
+
+[project.scripts]
+solomon = "solomon.cli:main"
+
+[project.entry-points."hermes_agent.plugins"]
+solomon = "solomon.plugin:register"
+
+[project.urls]
+Homepage = "https://github.com/kelix42/solomon"
+Documentation = "https://github.com/kelix42/solomon/blob/main/SPEC.md"
+
+[tool.setuptools.packages.find]
+include = ["solomon*"]
+
+[tool.setuptools.package-data]
+solomon = ["skills/*.md"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
