@@ -36,7 +36,51 @@ run() {
 
 [ "$DRY_RUN" -eq 1 ] && warn "DRY RUN — printing every step, executing nothing."
 
-# ---- 1. Find or install Hermes -----------------------------------------------
+# ---- Preflight: OS, git, and (after detecting Hermes) Python version ---------
+
+case "${OSTYPE:-}" in
+    msys*|cygwin*|win32*)
+        cat <<'EOF'
+
+Solomon doesn't run on native Windows yet.
+
+The good news is you can run Solomon on Windows through WSL (Windows
+Subsystem for Linux). Once you have WSL set up with a Linux distribution
+like Ubuntu, open it and run this same installer in there:
+
+  curl -fsSL https://raw.githubusercontent.com/kelix42/solomon/main/install.sh | bash
+
+If you'd rather not use WSL, native Windows support is on the roadmap.
+For now, the supported platforms are macOS and Linux (WSL counts as Linux).
+
+EOF
+        exit 1
+        ;;
+esac
+
+if ! command -v git >/dev/null 2>&1; then
+    cat <<'EOF'
+
+Solomon needs git installed.
+
+Solomon keeps a history of every change — what rules you've captured,
+what got edited, what you've rejected. It uses git to track those changes
+so you can roll back anything at any time. Without git, that history
+won't work.
+
+Install git, then run the Solomon installer again:
+
+  - macOS:   brew install git
+             (or: xcode-select --install)
+  - Linux:   sudo apt install git        (Debian / Ubuntu)
+             sudo dnf install git        (Fedora)
+
+EOF
+    exit 1
+fi
+ok "git detected ($(command -v git))"
+
+# ---- 1. Detect Hermes (don't install it ourselves) ---------------------------
 
 find_hermes_py() {
     for p in \
@@ -51,22 +95,69 @@ find_hermes_py() {
 HERMES_PY=""
 if HERMES_PY="$(find_hermes_py)"; then
     ok "Hermes detected (Python at $HERMES_PY)"
+elif [ "$DRY_RUN" -eq 1 ]; then
+    warn "Hermes not found — would normally exit with a message and stop here."
+    HERMES_PY="/usr/local/lib/hermes-agent/venv/bin/python3"
 else
-    warn "Hermes not found. Installing it now."
-    HERMES_INSTALL_URL="${HERMES_INSTALL_URL:-https://raw.githubusercontent.com/NousResearch/hermes-agent/main/scripts/install.sh}"
-    if [ "$DRY_RUN" -eq 0 ]; then
-        curl -fsSL "$HERMES_INSTALL_URL" | bash
-        HERMES_PY="$(find_hermes_py || true)"
-        if [ -z "$HERMES_PY" ]; then
-            err "Hermes installed but its Python venv is still not found."
-            err "Try: pip install hermes-agent"
-            exit 1
-        fi
-        ok "Hermes installed (Python at $HERMES_PY)"
-    else
-        printf "  [dry-run] curl -fsSL %s | bash\n" "$HERMES_INSTALL_URL"
-        HERMES_PY="/usr/local/lib/hermes-agent/venv/bin/python3"
+    cat <<'EOF'
+
+Solomon needs Hermes installed first.
+
+Solomon is built on top of Hermes — it adds a personal business brain to it.
+So Hermes has to be set up first before Solomon can do anything.
+
+Three steps:
+
+  1. Install Hermes:
+
+     curl -fsSL https://raw.githubusercontent.com/NousResearch/hermes-agent/main/scripts/install.sh | bash
+
+  2. Open Hermes once. It will ask you to pick a channel — Telegram, the
+     desktop chat, SMS, or whichever one you want to use. Follow Hermes's
+     setup. You'll know it's done when you can send Hermes a message and
+     get a reply back.
+
+  3. Come back here and run this same Solomon installer again:
+
+     curl -fsSL https://raw.githubusercontent.com/kelix42/solomon/main/install.sh | bash
+
+That's it. The Solomon installer will pick up where it left off — you
+don't lose any progress by stopping here.
+
+EOF
+    exit 1
+fi
+
+# Verify the Hermes Python is at least 3.10 (Solomon's minimum).
+if [ "$DRY_RUN" -eq 0 ]; then
+    HERMES_PY_VERSION="$("$HERMES_PY" -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")' 2>/dev/null || echo "unknown")"
+    if ! "$HERMES_PY" -c 'import sys; sys.exit(0 if sys.version_info >= (3, 10) else 1)' 2>/dev/null; then
+        cat <<EOF
+
+Solomon needs Python 3.10 or newer.
+
+Your Hermes installation is running on Python $HERMES_PY_VERSION, which is
+older than what Solomon supports.
+
+You have two ways forward:
+
+  1. Reinstall Hermes on a newer Python. Hermes's own docs explain how
+     to point its installer at a specific Python version.
+
+  2. Install a newer Python on this machine, then reinstall Hermes:
+
+       - macOS:  brew install python@3.12
+       - Linux:  sudo apt install python3.12   (Debian / Ubuntu)
+                 sudo dnf install python3.12   (Fedora)
+                 or use pyenv / asdf to manage versions
+
+Once Hermes is running on Python 3.10 or newer, come back and run the
+Solomon installer again.
+
+EOF
+        exit 1
     fi
+    ok "Hermes Python is $HERMES_PY_VERSION (>= 3.10)"
 fi
 
 # ---- 2. Bootstrap pip in the Hermes venv if missing --------------------------

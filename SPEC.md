@@ -74,16 +74,24 @@ curl -fsSL https://raw.githubusercontent.com/kelix42/solomon/main/install.sh | b
 
 The install script performs these steps in order, printing one line per step:
 
-1. **Detect Hermes.** Look for the Hermes Python venv at `/usr/local/lib/hermes-agent/venv/bin/python3`, `/opt/homebrew/lib/hermes-agent/venv/bin/python3`, and `$HOME/.hermes/hermes-agent/venv/bin/python3`. If none exist, run the Hermes install command (curl from the Hermes repo).
-2. **Bootstrap pip.** If the Hermes venv lacks pip, run `ensurepip --upgrade` to bootstrap it.
-3. **Install Solomon.** Run `pip install solomon-brain` into the Hermes venv (or `pip install -e .` if running from a repo checkout).
-4. **Wrap the CLI.** Create a `solomon` wrapper script next to the existing Hermes binary on PATH so `solomon doctor`, `solomon logs`, etc. work.
-5. **Scaffold the home folder.** Create `~/.hermes/solomon/` with empty template files for `profile.yaml`, `vocabulary.md`, and the thirteen playbook files. Create empty `inbox/`, `archive/`, and `logs/` subfolders. Initialize a git repo in the folder. Make the first commit ("Solomon initialized").
-6. **Install the skills.** Copy the four skill files (`solomon-default.md`, `solomon-interview.md`, `solomon-ingest.md`, `solomon-compress.md`) into `~/.hermes/skills/solomon/`.
-7. **Register Solomon with Hermes.** Add `solomon` to the `plugins.enabled` list in `~/.hermes/config.yaml`. Back up the original config to `config.yaml.pre-solomon`.
-8. **Install cron jobs.** Add three entries to the user's crontab: nightly reflection at 2:00 a.m., weekly compression at 3:00 a.m. Sunday, weekly check-in at 3:00 p.m. Friday.
-9. **Activate Solomon.** No sentinel file means Solomon is on.
-10. **Restart Hermes** if running.
+1. **Preflight checks (fail fast, plain-English messages, exit 1).** Before anything else, the installer runs three guards:
+
+   - **OS guard.** If `$OSTYPE` matches `msys*`, `cygwin*`, or `win32*` (native Windows bash environments), exit with a message pointing the owner to WSL.
+   - **git check.** `command -v git` — if git isn't on PATH, exit with install instructions for the owner's OS (brew/apt/dnf). Reason: `profile.py` uses git for auto-commits on every change; without git, the reversibility story breaks.
+   - **Python version check.** After Hermes is detected (see step 2), run `python3 -c 'import sys; sys.exit(0 if sys.version_info >= (3, 10) else 1)'` against the Hermes Python. If it returns non-zero, exit with a message telling the owner to reinstall Hermes on a newer Python.
+
+   Each failure message is plain English, fixed in `install.sh`, and gives the owner the exact command they need to run next. No stack traces. No "ERROR: prerequisite dependency not satisfied." The exit code is 1 so a CI or wrapping shell sees the failure.
+
+2. **Detect Hermes.** Look for the Hermes Python venv at `$HOME/.hermes/hermes-agent/venv/bin/python3`, `/usr/local/lib/hermes-agent/venv/bin/python3`, and `/opt/homebrew/lib/hermes-agent/venv/bin/python3`. If found, continue. If none exist, **the installer does NOT auto-install Hermes** — it prints a plain-English message telling the owner to install Hermes first, complete the gateway setup, and re-run the Solomon installer. The exit code is 1. Rationale: fewer failure modes, no risk of Hermes-side problems getting blamed on Solomon, and the owner ends up with a working Hermes they understand before Solomon touches anything. The message text is fixed in `install.sh`; it includes both the Hermes install command and the Solomon re-run command.
+3. **Bootstrap pip.** If the Hermes venv lacks pip, run `ensurepip --upgrade` to bootstrap it.
+4. **Install Solomon.** Run `pip install solomon-brain` into the Hermes venv (or `pip install -e .` if running from a repo checkout).
+5. **Wrap the CLI.** Create a `solomon` wrapper script next to the existing Hermes binary on PATH so `solomon doctor`, `solomon logs`, etc. work.
+6. **Scaffold the home folder.** Create `~/.hermes/solomon/` with empty template files for `profile.yaml`, `vocabulary.md`, and the thirteen function-playbook files (fourteen markdown files in total counting vocabulary). Create empty `inbox/`, `archive/`, and `logs/` subfolders. Initialize a git repo in the folder. Make the first commit ("Solomon initialized").
+7. **Install the skills.** Copy the four skill files (`solomon-default.md`, `solomon-interview.md`, `solomon-ingest.md`, `solomon-compress.md`) into `~/.hermes/skills/solomon/`.
+8. **Register Solomon with Hermes.** Add `solomon` to the `plugins.enabled` list in `~/.hermes/config.yaml`. Back up the original config to `config.yaml.pre-solomon`.
+9. **Install cron jobs.** Add three entries to the user's crontab: nightly reflection at 2:00 a.m., weekly compression at 3:00 a.m. Sunday, weekly check-in at 3:00 p.m. Friday. (Skipped with a warning if `crontab` is not on PATH — e.g., on systems that use launchd or no scheduler.)
+10. **Activate Solomon.** No sentinel file means Solomon is on.
+11. **Restart Hermes** if running.
 
 Final output to the user:
 
