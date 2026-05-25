@@ -1,119 +1,121 @@
-"""Tests for the daily cron."""
+"""Tests for daily.py — Hermes-cron registration and manual fire."""
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+import sys
+import types
 from pathlib import Path
-from types import SimpleNamespace
 
-from solomon import daily, profile, tools
+from solomon import daily, profile
 
 
 class FakeAdapter:
-    def __init__(self, convos=None, send_ok=True):
-        self.convos = convos or []
-        self.send_ok = send_ok
-        self.sent: list = []
-        self.ctx = SimpleNamespace()
+    def __init__(self):
+        self._jobs: dict[str, dict] = {}
+        self.registered: list[dict] = []
+        self.deleted: list[str] = []
 
-    def read_recent_conversations(self, since):
-        return self.convos
+    def register_cron_job(self, *, name, schedule, prompt, skill=None,
+                            skills=None, deliver="local",
+                            enabled_toolsets=None, model=None, repeat=None):
+        job = {"id": f"job_{name}", "name": name, "schedule": schedule,
+                "prompt": prompt, "skill": skill, "deliver": deliver,
+                "enabled_toolsets": enabled_toolsets}
+        self._jobs[name] = job
+        self.registered.append(job)
+        return job
 
-    def send_to_owner(self, text, *, channel=None):
-        self.sent.append((text, channel))
-        return self.send_ok
-
-    def llm_call(self, **kwargs):
-        return "ok"
-
-
-def test_daily_run_no_adapter_returns_zeroes(solomon_home: Path):
-    profile.init_solomon_home()
-    summary = daily.run(adapter=None)
-    assert summary["batches"] == 0
-    assert summary["files"] == 0
-
-
-def test_reflect_step_skips_private_conversations(solomon_home: Path):
-    profile.init_solomon_home()
-    adapter = FakeAdapter(convos=[
-        {"session_id": "s1", "private": True, "turns": [
-            {"role": "user", "content": "secret thing"}]},
-    ])
-    batches = daily.reflect_step(adapter=adapter)
-    assert batches == 0
-
-
-def test_reflect_step_processes_substantive_conversations(solomon_home: Path):
-    profile.init_solomon_home()
-    convo = {
-        "session_id": "s2",
-        "private": False,
-        "turns": [
-            {"role": "user", "content": "We just signed up a new vendor today, they handle our court filings."},
-            {"role": "assistant", "content": "Noted. Who is it?"},
-        ],
-    }
-    adapter = FakeAdapter(convos=[convo])
-    batches = daily.reflect_step(adapter=adapter)
-    assert batches == 1
-    assert adapter.llm_call.__name__ == "llm_call"  # sanity
-
-
-def test_daily_run_processes_inbox(solomon_home: Path):
-    profile.init_solomon_home()
-    (solomon_home / "inbox" / "doc.txt").write_text("policy: discounts cap at 15%")
-    adapter = FakeAdapter()
-    summary = daily.run(adapter=adapter)
-    assert summary["files"] == 1
-
-
-def test_daily_run_nudges_overdue_actions(solomon_home: Path):
-    profile.init_solomon_home()
-    iid = tools.propose_action(
-        source_kind="email", source_id="<dnudge>", source_summary="x",
-        first_pass_prediction="x", final_recommendation="x",
-        reasoning="x", urgency="high", action_kind="record_only",
-    )
-    # Stamp notification 5h ago so a nudge is due.
-    long_ago = (datetime.now(timezone.utc) - timedelta(hours=5)).isoformat()
-    profile.update_queue_item("actions", iid, {
-        "owner_notified_at": long_ago, "owner_notified_via": "telegram",
-    })
-    adapter = FakeAdapter()
-    summary = daily.run(adapter=adapter)
-    assert summary["nudges_sent"] >= 1
-
-
-def test_daily_run_acquires_lock_skips_if_held(solomon_home: Path):
-    profile.init_solomon_home()
-    # Open the lock first ourselves to block the cron.
-    import fcntl
-    f = open(daily._lock_path(), "w")
-    fcntl.flock(f.fileno(), fcntl.LOCK_EX)
-    try:
-        summary = daily.run(adapter=None)
-        assert summary.get("skipped") is True
-    finally:
-        fcntl.flock(f.fileno(), fcntl.LOCK_UN)
-        f.close()
-
-
-def test_daily_run_continues_on_step_failure(solomon_home: Path):
-    profile.init_solomon_home()
-
-    class BadAdapter:
-        ctx = SimpleNamespace()
-
-        def read_recent_conversations(self, since):
-            raise RuntimeError("hermes is sick")
-
-        def send_to_owner(self, text, *, channel=None):
+    def delete_cron_job(self, name):
+        if name in self._jobs:
+            del self._jobs[name]
+            self.deleted.append(name)
             return True
+        return False
 
-        def llm_call(self, **kwargs):
-            return "ok"
+    def _find_cron_job_by_name(self, name):
+        return self._jobs.get(name)
 
-    # Should not raise.
-    summary = daily.run(adapter=BadAdapter())
-    assert "batches" in summary
+
+def test_register_creates_one_job(solomon_home: Path):
+    profile.init_solomon_home()
+    a = FakeAdapter()
+    job = daily.register(a)
+    assert job["name"] == "solomon-daily-reflection"
+    assert job["schedule"] == "0 2 * * *"
+    assert job["skill"] == "solomon-ingest"
+    assert job["deliver"] == "local"
+    assert job["enabled_toolsets"] == ["solomon"]
+    assert "read_conversations" in job["prompt"]
+    assert "list_inbox" in job["prompt"]
+    assert "[SILENT]" in job["prompt"]
+
+
+def test_unregister(solomon_home: Path):
+    profile.init_solomon_home()
+    a = FakeAdapter()
+    daily.register(a)
+    assert daily.unregister(a) is True
+    assert "solomon-daily-reflection" in a.deleted
+
+
+def test_unregister_when_absent_returns_false(solomon_home: Path):
+    profile.init_solomon_home()
+    a = FakeAdapter()
+    assert daily.unregister(a) is False
+
+
+def test_run_now_without_adapter_returns_no_adapter(solomon_home: Path, monkeypatch):
+    profile.init_solomon_home()
+    from solomon import tools
+    monkeypatch.setattr(tools, "_adapter", None)
+    out = daily.run_now()
+    assert out["ok"] is False
+    assert "no adapter" in out["reason"]
+
+
+def test_run_now_fires_cron_job(solomon_home: Path, monkeypatch):
+    """If Hermes's cron module is available, run_now hands off to it."""
+    profile.init_solomon_home()
+    a = FakeAdapter()
+    daily.register(a)
+
+    # Inject a fake cron.scheduler.
+    fake_cron = types.ModuleType("cron")
+    fake_cron.__path__ = []
+    fake_jobs = types.ModuleType("cron.jobs")
+    fake_scheduler = types.ModuleType("cron.scheduler")
+
+    fired: list[dict] = []
+
+    def fake_run_job(job: dict):
+        fired.append(job)
+        return True, "output doc", "final reply", None
+
+    fake_scheduler.run_job = fake_run_job
+    monkeypatch.setitem(sys.modules, "cron", fake_cron)
+    monkeypatch.setitem(sys.modules, "cron.jobs", fake_jobs)
+    monkeypatch.setitem(sys.modules, "cron.scheduler", fake_scheduler)
+
+    out = daily.run_now(adapter=a)
+    assert out["ok"] is True
+    assert out["final_response"] == "final reply"
+    assert fired[0]["name"] == "solomon-daily-reflection"
+
+
+def test_run_now_auto_registers_if_missing(solomon_home: Path, monkeypatch):
+    """If the cron isn't registered, run_now registers it first then fires."""
+    profile.init_solomon_home()
+    a = FakeAdapter()
+
+    fake_cron = types.ModuleType("cron")
+    fake_cron.__path__ = []
+    fake_jobs = types.ModuleType("cron.jobs")
+    fake_scheduler = types.ModuleType("cron.scheduler")
+    fake_scheduler.run_job = lambda job: (True, "x", "y", None)
+    monkeypatch.setitem(sys.modules, "cron", fake_cron)
+    monkeypatch.setitem(sys.modules, "cron.jobs", fake_jobs)
+    monkeypatch.setitem(sys.modules, "cron.scheduler", fake_scheduler)
+
+    daily.run_now(adapter=a)
+    # The job got registered as a side effect.
+    assert "solomon-daily-reflection" in a._jobs

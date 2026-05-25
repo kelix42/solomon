@@ -1,200 +1,159 @@
-"""Weekly compression cron.
+"""Weekly compression crons — 14 playbook jobs + 1 summary job.
 
-Loops through the fourteen playbooks plus profile.yaml.summary. For each,
-asks the LLM (with solomon-compress.md loaded) to return JSON with a
-shorter rewritten version. Playbook diffs are queued for owner review;
-the profile.yaml summary is applied immediately because it's a derived
-field, not original content.
+Per the v3 plan, each playbook is compressed by its own Hermes cron job,
+staggered 5 minutes apart on Sunday starting at 03:00. This keeps the
+LLM's working context small (one playbook at a time, ~5-10K tokens) and
+sidesteps the "lost-in-the-middle" effect that would degrade quality if
+all 14 were compressed in a single iterating turn.
+
+Jobs registered:
+  solomon-compress-<name>   for each of the 14 playbooks
+  solomon-regenerate-summary  at 04:10 Sunday, regenerates profile summary
 """
 
 from __future__ import annotations
 
-import difflib
-import fcntl
-import json
-import re
-from pathlib import Path
 from typing import Any, Optional
 
 from . import logs, profile
 
-SKILL_PATH = Path(__file__).parent / "skills" / "solomon-compress.md"
-TRIVIAL_DIFF_THRESHOLD = 0.10  # if rewritten is within 10% of original size, skip
+# Sunday slots in 5-minute increments, starting at 03:00.
+def _slot_for_index(i: int) -> str:
+    minute = (i * 5) % 60
+    hour = 3 + (i * 5) // 60
+    return f"{minute} {hour} * * 0"
 
 
-def _lock_path() -> Path:
-    return profile.home() / ".weekly.lock"
+SUMMARY_JOB_NAME = "solomon-regenerate-summary"
+SUMMARY_SCHEDULE = "10 4 * * 0"  # Sunday 04:10
 
 
-def _acquire_lock():
-    profile.home().mkdir(parents=True, exist_ok=True)
-    f = open(_lock_path(), "w")
-    try:
-        fcntl.flock(f.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-        return f
-    except BlockingIOError:
-        f.close()
-        return None
+def _job_name_for(playbook: str) -> str:
+    return f"solomon-compress-{playbook}"
 
 
-def _release_lock(f) -> None:
-    try:
-        fcntl.flock(f.fileno(), fcntl.LOCK_UN)
-        f.close()
-        _lock_path().unlink(missing_ok=True)
-    except Exception:  # noqa: BLE001
-        pass
-
-
-def _skill_body() -> str:
-    text = SKILL_PATH.read_text(encoding="utf-8")
-    if text.startswith("---"):
-        end = text.find("\n---\n", 3)
-        if end != -1:
-            text = text[end + 5:]
-    return text.strip()
-
-
-def _parse_compression_response(text: str) -> Optional[dict]:
-    """Extract JSON {rewritten, summary} from the LLM's response text."""
-    # First, try direct parse.
-    try:
-        obj = json.loads(text)
-        if isinstance(obj, dict) and "rewritten" in obj and "summary" in obj:
-            return obj
-    except json.JSONDecodeError:
-        pass
-    # Fallback: look for a fenced ```json block.
-    m = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", text, re.DOTALL)
-    if m:
-        try:
-            obj = json.loads(m.group(1))
-            if isinstance(obj, dict) and "rewritten" in obj and "summary" in obj:
-                return obj
-        except json.JSONDecodeError:
-            return None
-    return None
-
-
-def _compress_one(name: str, current: str, *, adapter: Any) -> Optional[dict]:
-    """Ask the LLM to compress one file. Returns parsed JSON or None."""
-    system = _skill_body()
-    messages = [{"role": "user", "content":
-                 f"Playbook: {name}.md\n\nCurrent content:\n\n{current}"}]
-    try:
-        resp = adapter.llm_call(system=system, messages=messages,
-                                  json_mode=True, max_tokens=4096)
-    except Exception as e:  # noqa: BLE001
-        logs.log_error("error", e, where="weekly._compress_one",
-                        context={"file": name})
-        return None
-    parsed = _parse_compression_response(resp)
-    if not parsed:
-        logs.log("compression_parse_failed", file=name, level="WARN")
-    return parsed
-
-
-def _diff(old: str, new: str) -> str:
-    return "\n".join(
-        difflib.unified_diff(
-            old.splitlines(), new.splitlines(),
-            fromfile="old", tofile="new", lineterm="",
-        )
+def _prompt_for(playbook: str) -> str:
+    return (
+        f"Compress the '{playbook}' playbook. Use the solomon-compress skill.\n"
+        "\n"
+        f"Steps:\n"
+        f"1. Call read_playbook('{playbook}') to see the current content.\n"
+        "2. Rewrite it shorter without losing owner-specific phrases or "
+        "concrete rules. Strip redundancy and verbose prose. Preserve "
+        "verbatim quotes, exact numbers, names, and cross-references.\n"
+        f"3. Call propose_compression(file='{playbook}', content=<rewritten>, "
+        "summary=<one-sentence what-changed>, diff=''). The owner reviews "
+        "the diff in their next /mentor.\n"
+        "\n"
+        f"Final response: one-line status like 'compressed {playbook}: "
+        "removed 3 redundant statements.' Or [SILENT] if the playbook was "
+        "already tight and no compression was warranted."
     )
 
 
-def _significant(old: str, new: str) -> bool:
-    if not new or new.strip() == old.strip():
-        return False
-    if len(new) > len(old) * 0.95:
-        # Rewrite didn't actually save much. Skip.
-        return False
-    return True
+SUMMARY_PROMPT = (
+    "Regenerate the owner's profile summary. Use the solomon-compress skill.\n"
+    "\n"
+    "Steps:\n"
+    "1. Call read_profile('industry'), read_profile('why'), "
+    "read_profile('principles'), read_profile('non_negotiables') etc. for "
+    "every filled section.\n"
+    "2. Write a tight ~500-token summary in the owner's voice. Lead with "
+    "industry, why, and non-negotiables. Use the owner's exact phrases "
+    "where possible. Plain markdown. No section headings.\n"
+    "3. Call apply_profile_summary(<text>). This writes immediately; no "
+    "owner review.\n"
+    "\n"
+    "Final response: one line like 'summary regenerated.' Or [SILENT] if "
+    "the profile is empty (nothing meaningful to summarize)."
+)
 
 
-def run(*, adapter: Optional[Any] = None) -> dict:
-    """Compress every playbook + the profile summary. Return summary stats."""
-    lock = _acquire_lock()
-    if lock is None:
-        logs.log("cron_skipped", level="WARN",
-                 context={"cron": "weekly", "reason": "lock held"})
-        return {"compressed": 0, "skipped": 0, "summary_regenerated": False,
-                "lock_skipped": True}
+# ---------------------------------------------------------------------------
+# Registration
+# ---------------------------------------------------------------------------
 
-    logs.log("cron_start", context={"cron": "weekly"})
-    summary = {"compressed": 0, "skipped": 0, "summary_regenerated": False}
+
+def register(adapter: Any) -> list[dict]:
+    """Idempotently register all 15 weekly cron jobs.
+
+    Returns the list of registered Hermes cron job dicts.
+    """
+    registered: list[dict] = []
+    for i, playbook in enumerate(profile.PLAYBOOKS):
+        job = adapter.register_cron_job(
+            name=_job_name_for(playbook),
+            schedule=_slot_for_index(i),
+            prompt=_prompt_for(playbook),
+            skill="solomon-compress",
+            deliver="local",
+            enabled_toolsets=["solomon"],
+        )
+        registered.append(job)
+    summary_job = adapter.register_cron_job(
+        name=SUMMARY_JOB_NAME,
+        schedule=SUMMARY_SCHEDULE,
+        prompt=SUMMARY_PROMPT,
+        skill="solomon-compress",
+        deliver="local",
+        enabled_toolsets=["solomon"],
+    )
+    registered.append(summary_job)
+    logs.log("cron_registered_set",
+             context={"set": "weekly", "count": len(registered)})
+    return registered
+
+
+def unregister(adapter: Any) -> int:
+    """Remove all 15 weekly jobs. Returns the count removed."""
+    count = 0
+    for playbook in profile.PLAYBOOKS:
+        if adapter.delete_cron_job(_job_name_for(playbook)):
+            count += 1
+    if adapter.delete_cron_job(SUMMARY_JOB_NAME):
+        count += 1
+    return count
+
+
+def run_now(adapter: Optional[Any] = None,
+             which: Optional[str] = None) -> dict:
+    """Fire one weekly job ad-hoc, or all of them.
+
+    `which`: a playbook name (compress that one), 'summary' (the summary
+    job), 'all' (every weekly job). Default: 'all'.
+    """
+    if adapter is None:
+        from . import tools as tools_mod
+        adapter = tools_mod._adapter
+    if adapter is None:
+        return {"ok": False, "reason": "no adapter"}
     try:
-        if adapter is None:
-            logs.log("weekly_no_adapter", level="WARN")
-            return summary
-
-        # Playbooks.
-        for name in profile.PLAYBOOKS:
-            try:
-                current = profile.read_playbook(name)
-                parsed = _compress_one(name, current, adapter=adapter)
-                if parsed is None:
-                    summary["skipped"] += 1
-                    continue
-                if parsed.get("summary", "").strip().lower().startswith("no compression"):
-                    summary["skipped"] += 1
-                    continue
-                if not _significant(current, parsed.get("rewritten", "")):
-                    summary["skipped"] += 1
-                    continue
-                profile.append_review_item({
-                    "kind": "compression",
-                    "file": name,
-                    "section": None,
-                    "content": parsed["rewritten"],
-                    "reason": parsed.get("summary", "compressed"),
-                    "diff": _diff(current, parsed["rewritten"]),
-                })
-                summary["compressed"] += 1
-            except Exception as e:  # noqa: BLE001
-                logs.log_error("error", e, where="weekly.run",
-                                context={"file": name})
-                summary["skipped"] += 1
-
-        # Profile summary: regenerate from current profile + playbooks.
-        try:
-            import yaml
-            data = yaml.safe_load((profile.home() / "profile.yaml").read_text())
-            # Build a compact "what's filled" digest for the LLM.
-            digest_lines = []
-            for sec in ("industry", "belief_system", "why", "principles",
-                        "ideal_outcomes", "non_negotiables", "scopes"):
-                s = data.get(sec, {}) or {}
-                if s.get("filled"):
-                    pruned = {k: v for k, v in s.items()
-                              if k not in ("filled", "filled_at") and v}
-                    digest_lines.append(f"{sec}: {yaml.safe_dump(pruned, sort_keys=False).strip()}")
-            digest = "\n\n".join(digest_lines)
-            if digest:
-                system = (
-                    "Write a tight ~500-token summary of this owner's foundation. "
-                    "Lead with industry, why, and non-negotiables. Use the owner's "
-                    "exact phrases where possible. Plain markdown. No headings."
-                )
-                messages = [{"role": "user", "content": digest}]
-                try:
-                    text = adapter.llm_call(system=system, messages=messages,
-                                              max_tokens=2048)
-                    if text and text.strip():
-                        profile.update_profile_summary(text.strip())
-                        summary["summary_regenerated"] = True
-                        logs.log("summary_regenerated")
-                except Exception as e:  # noqa: BLE001
-                    logs.log_error("error", e, where="weekly.summary_regenerate")
-        except Exception as e:  # noqa: BLE001
-            logs.log_error("error", e, where="weekly.summary_regenerate.outer")
-
-        logs.log("cron_end", context={"cron": "weekly", **summary})
-    finally:
-        _release_lock(lock)
-    return summary
+        from cron.scheduler import run_job
+    except ImportError as e:
+        logs.log_error("error", e, where="weekly.run_now (import)")
+        return {"ok": False, "reason": "Hermes cron unavailable"}
+    targets: list[str] = []
+    if which in (None, "all"):
+        targets.extend(_job_name_for(p) for p in profile.PLAYBOOKS)
+        targets.append(SUMMARY_JOB_NAME)
+    elif which == "summary":
+        targets.append(SUMMARY_JOB_NAME)
+    elif which in profile.PLAYBOOKS:
+        targets.append(_job_name_for(which))
+    else:
+        return {"ok": False, "reason": f"unknown target {which!r}"}
+    results = []
+    for name in targets:
+        job = adapter._find_cron_job_by_name(name)
+        if not job:
+            results.append({"name": name, "ok": False, "reason": "not registered"})
+            continue
+        success, output, final_response, error = run_job(job)
+        results.append({"name": name, "ok": success,
+                         "final": final_response, "error": error})
+    return {"ok": all(r.get("ok") for r in results), "results": results}
 
 
 def main() -> int:
-    run()
+    run_now()
     return 0

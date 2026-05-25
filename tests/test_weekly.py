@@ -1,131 +1,148 @@
-"""Tests for the weekly compression cron."""
+"""Tests for weekly.py — 15 staggered cron registrations + manual fire."""
 
 from __future__ import annotations
 
-import json
+import sys
+import types
 from pathlib import Path
-from types import SimpleNamespace
-
-import yaml
 
 from solomon import profile, weekly
 
 
-class FakeLLM:
-    """Returns scripted JSON responses for compression and plain text for summary."""
+class FakeAdapter:
+    def __init__(self):
+        self._jobs: dict[str, dict] = {}
+        self.registered: list[dict] = []
+        self.deleted: list[str] = []
 
-    def __init__(self, *, compressed_text: str = None, summary: str = "tight new summary"):
-        self.compressed_text = compressed_text
-        self.summary = summary
-        self.calls = 0
-        self.ctx = SimpleNamespace()
+    def register_cron_job(self, *, name, schedule, prompt, skill=None,
+                            skills=None, deliver="local",
+                            enabled_toolsets=None, model=None, repeat=None):
+        job = {"id": f"job_{name}", "name": name, "schedule": schedule,
+                "prompt": prompt, "skill": skill, "deliver": deliver}
+        self._jobs[name] = job
+        self.registered.append(job)
+        return job
 
-    def llm_call(self, *, system, messages, json_mode=False, max_tokens=2048):
-        self.calls += 1
-        # The compression skill expects JSON {rewritten, summary}.
-        # The summary regen expects plain text.
-        if "compress" in system.lower() or "playbook:" in (messages[0]["content"] or "").lower():
-            text = self.compressed_text or "# X\n\nshorter."
-            return json.dumps({
-                "rewritten": text,
-                "summary": "removed three redundant statements, kept exact owner phrases",
-            })
-        return self.summary
+    def delete_cron_job(self, name):
+        if name in self._jobs:
+            del self._jobs[name]
+            self.deleted.append(name)
+            return True
+        return False
 
-
-def _seed_verbose_playbook(home: Path, name: str = "finance"):
-    p = home / f"{name}.md"
-    p.write_text("# Finance\n\nA very verbose description.\n\n" * 5
-                  + "Last updated: 2026-01-01\n\n## See also\n", encoding="utf-8")
+    def _find_cron_job_by_name(self, name):
+        return self._jobs.get(name)
 
 
-def test_weekly_run_no_adapter_returns_zero(solomon_home: Path):
+def test_register_creates_15_jobs(solomon_home: Path):
     profile.init_solomon_home()
-    summary = weekly.run(adapter=None)
-    assert summary["compressed"] == 0
+    a = FakeAdapter()
+    jobs = weekly.register(a)
+    # 14 playbook compression jobs + 1 summary job
+    assert len(jobs) == 15
+    names = {j["name"] for j in jobs}
+    for playbook in profile.PLAYBOOKS:
+        assert f"solomon-compress-{playbook}" in names
+    assert "solomon-regenerate-summary" in names
 
 
-def test_weekly_run_queues_compression_proposals(solomon_home: Path):
+def test_schedules_are_staggered(solomon_home: Path):
     profile.init_solomon_home()
-    _seed_verbose_playbook(solomon_home)
-    adapter = FakeLLM(compressed_text="# Finance\n\nshort.\n")
-    summary = weekly.run(adapter=adapter)
-    assert summary["compressed"] >= 1
-    queue = profile.read_queue("review", status="pending")
-    assert any(it.get("kind") == "compression" for it in queue)
+    a = FakeAdapter()
+    weekly.register(a)
+    schedules = [j["schedule"] for j in a.registered]
+    # Distinct schedules (no duplicates) — staggered.
+    assert len(set(schedules)) == len(schedules)
 
 
-def test_weekly_run_skips_trivial_changes(solomon_home: Path):
+def test_schedules_start_at_03_00_sunday(solomon_home: Path):
     profile.init_solomon_home()
-
-    class EchoLLM:
-        """Returns the input playbook unchanged — should always be skipped."""
-        ctx = SimpleNamespace()
-
-        def llm_call(self, *, system, messages, **kwargs):
-            content = messages[0]["content"]
-            # Extract just the "Current content:" section.
-            if "Current content:" in content:
-                current = content.split("Current content:", 1)[1].strip()
-            else:
-                current = content
-            return json.dumps({"rewritten": current, "summary": "No compression needed."})
-
-    summary = weekly.run(adapter=EchoLLM())
-    assert summary["compressed"] == 0
-    assert summary["skipped"] >= len(profile.PLAYBOOKS)
+    a = FakeAdapter()
+    weekly.register(a)
+    # First playbook should be at minute=0, hour=3, day-of-week=0 (Sunday).
+    first = a.registered[0]
+    assert first["schedule"] == "0 3 * * 0"
 
 
-def test_weekly_regenerates_summary_when_profile_has_content(solomon_home: Path):
+def test_summary_schedule(solomon_home: Path):
     profile.init_solomon_home()
-    profile.write_session_summary(0, {
-        "business_category": "real estate law",
-        "primary_product_or_service": "title work",
-        "customer_orientation": "B2C",
-        "geographic_scope": "local",
-        "revenue_model": "project",
-        "growth_stage": "established",
-        "concentration_risk": "low",
-    })
-    adapter = FakeLLM(summary="real estate law firm, local, project billing")
-    summary = weekly.run(adapter=adapter)
-    assert summary["summary_regenerated"] is True
-    data = yaml.safe_load((solomon_home / "profile.yaml").read_text())
-    assert "real estate" in (data["summary"]["text"] or "")
+    a = FakeAdapter()
+    weekly.register(a)
+    summary_job = next(j for j in a.registered if j["name"] == "solomon-regenerate-summary")
+    assert summary_job["schedule"] == "10 4 * * 0"
+    assert "apply_profile_summary" in summary_job["prompt"]
 
 
-def test_weekly_parse_response_with_fenced_block():
-    parsed = weekly._parse_compression_response(
-        "Here's the compressed file:\n\n```json\n"
-        '{"rewritten": "# X\\n\\ndone.", "summary": "tightened"}\n'
-        "```\nthat's all."
-    )
-    assert parsed and parsed["summary"] == "tightened"
-
-
-def test_weekly_handles_unparseable_response(solomon_home: Path):
+def test_each_playbook_prompt_references_its_playbook(solomon_home: Path):
     profile.init_solomon_home()
-    _seed_verbose_playbook(solomon_home)
-
-    class UnparseableLLM:
-        ctx = SimpleNamespace()
-
-        def llm_call(self, **kwargs):
-            return "I cannot do this."
-
-    summary = weekly.run(adapter=UnparseableLLM())
-    assert summary["compressed"] == 0
-    assert summary["skipped"] >= 1
+    a = FakeAdapter()
+    weekly.register(a)
+    for playbook in profile.PLAYBOOKS:
+        job = a._find_cron_job_by_name(f"solomon-compress-{playbook}")
+        assert playbook in job["prompt"]
+        assert "propose_compression" in job["prompt"]
 
 
-def test_weekly_lock_skip_when_held(solomon_home: Path):
+def test_unregister_removes_all_15(solomon_home: Path):
     profile.init_solomon_home()
-    import fcntl
-    f = open(weekly._lock_path(), "w")
-    fcntl.flock(f.fileno(), fcntl.LOCK_EX)
-    try:
-        summary = weekly.run(adapter=None)
-        assert summary.get("lock_skipped") is True
-    finally:
-        fcntl.flock(f.fileno(), fcntl.LOCK_UN)
-        f.close()
+    a = FakeAdapter()
+    weekly.register(a)
+    count = weekly.unregister(a)
+    assert count == 15
+    assert a._jobs == {}
+
+
+def test_run_now_one_playbook(solomon_home: Path, monkeypatch):
+    profile.init_solomon_home()
+    a = FakeAdapter()
+    weekly.register(a)
+
+    fake_scheduler = types.ModuleType("cron.scheduler")
+    fired: list[str] = []
+
+    def fake_run_job(job):
+        fired.append(job["name"])
+        return True, "out", "done", None
+
+    fake_scheduler.run_job = fake_run_job
+    monkeypatch.setitem(sys.modules, "cron.scheduler", fake_scheduler)
+
+    out = weekly.run_now(adapter=a, which="finance")
+    assert out["ok"] is True
+    assert fired == ["solomon-compress-finance"]
+
+
+def test_run_now_all(solomon_home: Path, monkeypatch):
+    profile.init_solomon_home()
+    a = FakeAdapter()
+    weekly.register(a)
+
+    fake_scheduler = types.ModuleType("cron.scheduler")
+    fired: list[str] = []
+    fake_scheduler.run_job = lambda job: (fired.append(job["name"]) or (True, "", "", None))
+    monkeypatch.setitem(sys.modules, "cron.scheduler", fake_scheduler)
+
+    out = weekly.run_now(adapter=a, which="all")
+    assert len(fired) == 15
+
+
+def test_run_now_summary_only(solomon_home: Path, monkeypatch):
+    profile.init_solomon_home()
+    a = FakeAdapter()
+    weekly.register(a)
+
+    fake_scheduler = types.ModuleType("cron.scheduler")
+    fired: list[str] = []
+    fake_scheduler.run_job = lambda job: (fired.append(job["name"]) or (True, "", "", None))
+    monkeypatch.setitem(sys.modules, "cron.scheduler", fake_scheduler)
+
+    weekly.run_now(adapter=a, which="summary")
+    assert fired == ["solomon-regenerate-summary"]
+
+
+def test_run_now_unknown_target(solomon_home: Path):
+    profile.init_solomon_home()
+    a = FakeAdapter()
+    out = weekly.run_now(adapter=a, which="not_a_playbook")
+    assert out["ok"] is False

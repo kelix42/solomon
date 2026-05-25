@@ -1,167 +1,105 @@
-"""Nightly cron: reflection + ingestion + nudge + pending-message retry.
+"""Daily reflection cron — Hermes-cron registration and manual-fire.
 
-Runs once a day at 02:00 local. Wraps the work in a single lock file so
-two cron firings can't stomp each other. Errors in any single step are
-logged and skipped; the next step still runs.
+The cron fires once a day at 02:00 local. The agent turn is driven by
+the `solomon-ingest` skill plus this short prompt; the LLM uses the
+cron-side tools registered through `tools.register_all` (read_conversations,
+list_inbox, archive_file, propose_addition, send_nudge, etc.) to do the
+actual work.
+
+This module's job is to make sure the cron is registered and to provide
+a manual-fire path used by `/reflect` and by tests.
 """
 
 from __future__ import annotations
 
-import fcntl
-import os
-from datetime import datetime, timedelta, timezone
-from pathlib import Path
 from typing import Any, Optional
 
-from . import ingest, inbound, logs, profile, tools
+from . import logs
+
+JOB_NAME = "solomon-daily-reflection"
+SCHEDULE = "0 2 * * *"  # daily at 02:00 local
+
+PROMPT = (
+    "Run the daily reflection. Use the solomon-ingest skill and these tools.\n"
+    "\n"
+    "Steps:\n"
+    "1. Call read_conversations(since_hours=24) to see yesterday's non-private "
+    "    Hermes turns. For each substantial conversation, identify any new "
+    "    rules, vocabulary, customer/vendor info, or patterns and call "
+    "    propose_addition (or flag_contradiction) per finding.\n"
+    "2. Call list_inbox(). For each file: read_inbox_file(name), extract the "
+    "    same kinds of findings, then archive_file(name, status='processed'). "
+    "    If the LLM call fails for a file, archive with status='failed' and "
+    "    an error note.\n"
+    "3. Call list_pending_actions_due_for_nudge(). For each due item compose "
+    "    a one-sentence nudge in the owner's voice and call send_nudge(item_id, "
+    "    text). The send_nudge tool enforces the urgency cadence — don't "
+    "    second-guess it.\n"
+    "4. Call retry_pending_messages() to flush anything queued from previous "
+    "    failed sends.\n"
+    "\n"
+    "Final response: one-line status summary like 'Processed 3 inbox files, "
+    "sent 2 nudges.' Or return exactly [SILENT] if nothing happened."
+)
 
 
-def _lock_path() -> Path:
-    return profile.home() / ".daily.lock"
+def register(adapter: Any) -> dict:
+    """Idempotently register the daily cron with Hermes."""
+    job = adapter.register_cron_job(
+        name=JOB_NAME,
+        schedule=SCHEDULE,
+        prompt=PROMPT,
+        skill="solomon-ingest",
+        deliver="local",
+        enabled_toolsets=["solomon"],
+    )
+    logs.log("cron_registered", context={"job": JOB_NAME, "id": job.get("id")})
+    return job
 
 
-def _acquire_lock():
-    profile.home().mkdir(parents=True, exist_ok=True)
-    f = open(_lock_path(), "w")
-    try:
-        fcntl.flock(f.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-        return f
-    except BlockingIOError:
-        f.close()
-        return None
+def unregister(adapter: Any) -> bool:
+    return adapter.delete_cron_job(JOB_NAME)
 
 
-def _release_lock(f) -> None:
-    try:
-        fcntl.flock(f.fileno(), fcntl.LOCK_UN)
-        f.close()
-        _lock_path().unlink(missing_ok=True)
-    except Exception:  # noqa: BLE001
-        pass
+def run_now(adapter: Optional[Any] = None) -> dict:
+    """Fire the daily cron once, immediately. Used by /reflect.
 
-
-def reflect_step(*, adapter: Optional[Any] = None,
-                  since_hours: int = 24) -> int:
-    """Read recent Hermes conversations and feed each session-batch through the
-    ingest skill. Returns the number of conversation batches processed.
+    Returns whatever Hermes's run_job returns plus a summary dict if
+    parseable. If adapter isn't given (e.g., called from a CLI before
+    plugin.register), we look it up through tools._adapter.
     """
     if adapter is None:
-        return 0
-    since = datetime.now(timezone.utc) - timedelta(hours=since_hours)
-    convos = adapter.read_recent_conversations(since)
-    batches = 0
-    for c in convos:
-        if c.get("private"):
-            continue
-        turns = c.get("turns") or []
-        # Filter out trivial turns (very short greetings, etc.)
-        substantive = [t for t in turns if len((t.get("content") or "").strip()) > 12]
-        if not substantive:
-            continue
-        # Concatenate as a single document for the ingest skill.
-        as_text = "\n\n".join(f"{t.get('role', 'user')}: {t.get('content', '')}"
-                              for t in substantive)
-        # Save to a tmpfile path so ingest.process_file can pick it up.
-        tmp_dir = profile.home() / ".reflection"
-        tmp_dir.mkdir(exist_ok=True)
-        tmp_file = tmp_dir / f"conv_{c.get('session_id', 'unknown')}.txt"
-        tmp_file.write_text(as_text, encoding="utf-8")
-        try:
-            ingest.process_file(tmp_file, adapter=adapter)
-        finally:
-            # The reflection tmpdir isn't archived. Clean up if the process_file
-            # didn't already move it (it moves files in `inbox/` only).
-            if tmp_file.exists():
-                tmp_file.unlink()
-        batches += 1
-    # Clean up the reflection dir if empty.
-    tmp_dir = profile.home() / ".reflection"
-    if tmp_dir.exists() and not any(tmp_dir.iterdir()):
-        tmp_dir.rmdir()
-    return batches
-
-
-def run(*, adapter: Optional[Any] = None,
-         since_hours: int = 24) -> dict:
-    """Run all four daily steps. Returns summary stats."""
-    lock = _acquire_lock()
-    if lock is None:
-        logs.log("cron_skipped", level="WARN", context={"cron": "daily", "reason": "lock held"})
-        return {"batches": 0, "files": 0, "proposals": 0,
-                "nudges_sent": 0, "actions_stale": 0,
-                "pending_messages_sent": 0, "skipped": True}
-
-    logs.log("cron_start", context={"cron": "daily"})
-    summary = {"batches": 0, "files": 0, "proposals": 0,
-               "nudges_sent": 0, "actions_stale": 0,
-               "pending_messages_sent": 0}
+        from . import tools as tools_mod
+        adapter = tools_mod._adapter
+    if adapter is None:
+        logs.log("run_now_no_adapter", level="WARN", context={"cron": JOB_NAME})
+        return {"ok": False, "reason": "no adapter"}
     try:
-        # Rotate yesterday's log file if needed (best-effort).
-        try:
-            logs.rotate_if_needed()
-            logs.archive_old_logs()
-        except Exception as e:  # noqa: BLE001
-            logs.log_error("error", e, where="daily.log_rotation")
-
-        # 1. Reflection on yesterday's Hermes turns.
-        try:
-            summary["batches"] = reflect_step(adapter=adapter,
-                                                since_hours=since_hours)
-        except Exception as e:  # noqa: BLE001
-            logs.log_error("error", e, where="daily.reflect_step")
-
-        # 2. Inbox ingestion.
-        try:
-            counts_before = len(profile.read_queue("review", "pending", limit=10_000))
-            counts = ingest.process_all(adapter=adapter)
-            summary["files"] = counts["ok"]
-            counts_after = len(profile.read_queue("review", "pending", limit=10_000))
-            summary["proposals"] = max(0, counts_after - counts_before)
-        except Exception as e:  # noqa: BLE001
-            logs.log_error("error", e, where="daily.ingest")
-
-        # 3. Nudge step on pending actions. Adapter is captured at register-time
-        #    by tools; if the caller passed one in, also wire it temporarily.
-        if adapter is not None:
-            tools._adapter = adapter
-        try:
-            due = tools.list_pending_actions_due_for_nudge()
-            sent = 0
-            stale = 0
-            for item in due:
-                text = (f"Still waiting on the {item.get('action_kind', '')} for "
-                        f"{item.get('source_summary', '')}. Want to go ahead?")
-                if tools.send_nudge(item["id"], text):
-                    sent += 1
-                    # Check if it became stale on this run.
-                    refreshed = profile.find_queue_item("actions", item["id"])
-                    if refreshed and refreshed.get("status") == "stale":
-                        stale += 1
-            summary["nudges_sent"] = sent
-            summary["actions_stale"] = stale
-        except Exception as e:  # noqa: BLE001
-            logs.log_error("error", e, where="daily.nudge_step")
-
-        # 4. Retry any pending messages.
-        try:
-            summary["pending_messages_sent"] = tools.retry_pending_messages()
-        except Exception as e:  # noqa: BLE001
-            logs.log_error("error", e, where="daily.retry_pending_messages")
-
-        logs.log("cron_end", context={"cron": "daily", **summary})
-    finally:
-        _release_lock(lock)
-    return summary
-
-
-def run_now() -> dict:
-    """Manual override — fire the daily cron once, right now. Used by /reflect.
-    Step 6 will replace this and `run` with a thin Hermes-cron registration.
-    """
-    return run()
+        from cron import jobs as cron_jobs
+        from cron.scheduler import run_job
+    except ImportError as e:
+        logs.log_error("error", e, where="daily.run_now (import)")
+        return {"ok": False, "reason": "Hermes cron unavailable"}
+    job = adapter._find_cron_job_by_name(JOB_NAME)
+    if not job:
+        # Not registered yet — register, then fire.
+        job = register(adapter)
+    success, output, final_response, error = run_job(job)
+    logs.log("cron_fired_manually",
+             context={"job": JOB_NAME, "success": success,
+                       "error": error or ""})
+    return {
+        "ok": success,
+        "output": output,
+        "final_response": final_response,
+        "error": error,
+        # Backwards-compat keys consumed by slash.cmd_reflect:
+        "batches": 0, "files": 0, "proposals": 0,
+        "nudges_sent": 0, "actions_stale": 0,
+    }
 
 
 def main() -> int:
-    """Entry point if invoked as a script."""
-    run()
+    # Kept for `solomon daily` CLI; in practice Hermes's scheduler fires this.
+    run_now()
     return 0

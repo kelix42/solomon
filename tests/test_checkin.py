@@ -1,95 +1,76 @@
-"""Tests for the weekly check-in cron."""
+"""Tests for checkin.py — cron registration + manual fire."""
 
 from __future__ import annotations
 
+import sys
+import types
 from pathlib import Path
-from types import SimpleNamespace
-
-import yaml
 
 from solomon import checkin, profile
 
 
-class FakeLLM:
-    def __init__(self, response="Hey — quick check-in: your marketing is thin. Want to talk?", send_ok=True):
-        self.response = response
-        self.send_ok = send_ok
-        self.sent: list = []
-        self.ctx = SimpleNamespace()
+class FakeAdapter:
+    def __init__(self):
+        self._jobs: dict[str, dict] = {}
 
-    def llm_call(self, *, system, messages, **kwargs):
-        return self.response
+    def register_cron_job(self, *, name, schedule, prompt, skill=None,
+                            skills=None, deliver="local",
+                            enabled_toolsets=None, model=None, repeat=None):
+        job = {"id": f"job_{name}", "name": name, "schedule": schedule,
+                "prompt": prompt, "skill": skill, "deliver": deliver}
+        self._jobs[name] = job
+        return job
 
-    def read_recent_conversations(self, since):
-        return [{"session_id": "s1", "turns": [], "private": False}]
+    def delete_cron_job(self, name):
+        return self._jobs.pop(name, None) is not None
 
-    def send_to_owner(self, text, *, channel=None):
-        self.sent.append((text, channel))
-        return self.send_ok
-
-
-def _set_channel(home: Path, ch: str):
-    data = yaml.safe_load((home / "profile.yaml").read_text())
-    data.setdefault("meta", {})["preferred_channel"] = ch
-    (home / "profile.yaml").write_text(yaml.safe_dump(data, sort_keys=False))
+    def _find_cron_job_by_name(self, name):
+        return self._jobs.get(name)
 
 
-def test_checkin_no_adapter_returns_empty(solomon_home: Path):
+def test_register(solomon_home: Path):
     profile.init_solomon_home()
-    summary = checkin.run(adapter=None)
-    assert summary["sent"] is False
+    a = FakeAdapter()
+    job = checkin.register(a)
+    assert job["name"] == "solomon-weekly-checkin"
+    assert job["schedule"] == "0 15 * * 5"
+    assert job["skill"] == "solomon-interview"
+    assert job["deliver"] == "origin"
+    assert "Weekly check-in" in job["prompt"]
+    assert "[SILENT]" in job["prompt"]
 
 
-def test_checkin_sends_via_preferred_channel(solomon_home: Path):
+def test_unregister(solomon_home: Path):
     profile.init_solomon_home()
-    _set_channel(solomon_home, "telegram")
-    adapter = FakeLLM()
-    summary = checkin.run(adapter=adapter)
-    assert summary["sent"] is True
-    assert adapter.sent and adapter.sent[0][1] == "telegram"
+    a = FakeAdapter()
+    checkin.register(a)
+    assert checkin.unregister(a) is True
 
 
-def test_checkin_queues_on_send_failure(solomon_home: Path):
+def test_run_now_no_adapter(solomon_home: Path, monkeypatch):
     profile.init_solomon_home()
-    _set_channel(solomon_home, "telegram")
-    adapter = FakeLLM(send_ok=False)
-    summary = checkin.run(adapter=adapter)
-    assert summary["queued"] is True
-    assert (solomon_home / "pending_messages.jsonl").exists()
+    from solomon import tools
+    monkeypatch.setattr(tools, "_adapter", None)
+    out = checkin.run_now()
+    assert out["ok"] is False
 
 
-def test_checkin_handles_llm_failure(solomon_home: Path):
+def test_run_now_fires(solomon_home: Path, monkeypatch):
     profile.init_solomon_home()
+    a = FakeAdapter()
+    checkin.register(a)
 
-    class BadLLM:
-        def llm_call(self, **kwargs):
-            raise RuntimeError("LLM down")
+    fake_scheduler = types.ModuleType("cron.scheduler")
+    fired: list[dict] = []
 
-        def read_recent_conversations(self, since):
-            return []
+    def fake_run_job(job):
+        fired.append(job)
+        return True, "out", "Hey — quick gap question.", None
 
-        def send_to_owner(self, text, *, channel=None):
-            return True
+    fake_scheduler.run_job = fake_run_job
+    monkeypatch.setitem(sys.modules, "cron.scheduler", fake_scheduler)
 
-    summary = checkin.run(adapter=BadLLM())
-    assert summary["sent"] is False
-
-
-def test_checkin_handles_empty_llm_response(solomon_home: Path):
-    profile.init_solomon_home()
-    adapter = FakeLLM(response="")
-    summary = checkin.run(adapter=adapter)
-    assert summary["sent"] is False
-
-
-def test_checkin_lock_skip(solomon_home: Path):
-    profile.init_solomon_home()
-    import fcntl
-    f = open(checkin._lock_path(), "w")
-    fcntl.flock(f.fileno(), fcntl.LOCK_EX)
-    try:
-        summary = checkin.run(adapter=None)
-        assert summary.get("lock_skipped") is True
-    finally:
-        fcntl.flock(f.fileno(), fcntl.LOCK_UN)
-        f.close()
+    out = checkin.run_now(adapter=a)
+    assert out["ok"] is True
+    assert out["final_response"] == "Hey — quick gap question."
+    assert fired[0]["name"] == "solomon-weekly-checkin"
