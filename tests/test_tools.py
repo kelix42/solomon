@@ -208,3 +208,26 @@ def test_register_all_calls_adapter(solomon_home: Path):
     rp_handler = next(c[2] for c in calls if c[0] == "read_profile")
     result = rp_handler({"section": "industry"})
     assert "not yet filled" in result
+
+
+def test_handler_accepts_extra_kwargs_from_hermes(solomon_home):
+    """Hermes's tools/registry.py:404 calls `handler(args, **kwargs)` — passing
+    context kwargs like task_id alongside the args dict. Our handler wrapper
+    must accept and discard them, otherwise every tool call from a cron or
+    live agent turn fails with TypeError. Regression test for the 2026-05-25
+    incident where the LLM tried to lock in session 0 and both
+    mark_session_complete + apply_profile_summary failed mid-conversation."""
+    from solomon import profile, tools
+    profile.init_solomon_home()
+
+    calls = []
+
+    class FakeAdapter:
+        def register_tool(self, *, name, description, schema, handler):
+            calls.append((name, handler))
+
+    tools.register_all(FakeAdapter())
+    rp_handler = next(h for n, h in calls if n == "read_profile")
+    # Should NOT raise even when Hermes passes task_id (and any future kwarg).
+    out = rp_handler({"section": "industry"}, task_id="some-task")
+    assert "not yet filled" in out

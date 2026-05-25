@@ -86,6 +86,39 @@ def test_cli_uninstall_keeps_data_by_default(solomon_home: Path, capsys, monkeyp
     assert (solomon_home / "profile.yaml").exists()
 
 
+def test_cli_profile_empty_install(solomon_home: Path, capsys):
+    cli.main(["init"])
+    capsys.readouterr()  # discard init output
+    rc = cli.main(["profile"])
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "Foundation sessions" in out
+    # Every session should show as not filled.
+    assert "○ Session 0" in out
+    assert "○ Session 6" in out
+    assert "Review queue" in out
+
+
+def test_cli_profile_after_session_save(solomon_home: Path, capsys):
+    from solomon import profile
+    cli.main(["init"])
+    capsys.readouterr()
+    profile.write_session_summary(0, {
+        "business_category": "boutique consultancy",
+        "primary_product_or_service": "strategy advisory",
+        "customer_orientation": "B2B",
+        "geographic_scope": "national",
+        "revenue_model": "project",
+        "growth_stage": "early",
+        "concentration_risk": "two clients account for 60% of revenue",
+    })
+    rc = cli.main(["profile"])
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "✓ Session 0" in out
+    assert "boutique consultancy" in out
+
+
 def test_cli_register_crons_handles_missing_hermes(solomon_home: Path,
                                                      capsys, monkeypatch):
     """Without real Hermes cron modules, register-crons must surface a clear

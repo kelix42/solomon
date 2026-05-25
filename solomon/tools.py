@@ -854,8 +854,16 @@ def register_all(adapter) -> None:  # noqa: ANN001
 
 
 def _make_handler(fn):
-    """Wrap a tool function so it accepts a dict of args (Hermes convention)."""
-    def handler(args: dict) -> Any:
+    """Wrap a tool function so it accepts a dict of args (Hermes convention).
+
+    Hermes's tools/registry.py:404 calls handlers as `handler(args, **kwargs)`,
+    passing context kwargs like `task_id` alongside the args dict. We accept
+    and discard those — none of Solomon's tools need them today. Returning
+    something other than a string would also be fine (Hermes JSON-encodes
+    non-string returns), but most of our tools already return primitives or
+    short status messages.
+    """
+    def handler(args: dict, **_ctx: Any) -> Any:
         return fn(**args)
     handler.__name__ = fn.__name__
     return handler

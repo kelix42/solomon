@@ -3,6 +3,7 @@
 Subcommands:
   solomon init             Scaffold ~/.hermes/solomon/ and finish setup.
   solomon doctor           Health check.
+  solomon profile          Show what Solomon has saved about you.
   solomon logs             View structured logs.
   solomon register-crons   Register Solomon's 17 cron jobs with Hermes.
   solomon uninstall-crons  Remove every Solomon cron from Hermes.
@@ -61,6 +62,8 @@ def main(argv: Optional[list[str]] = None) -> int:
         result = daily.run_now(adapter=_build_adapter())
         print(result)
         return 0 if result.get("ok") else 1
+    if sub == "profile":
+        return _cmd_profile()
     if sub == "uninstall":
         purge = "--purge" in rest
         return _cmd_uninstall(purge=purge)
@@ -77,6 +80,7 @@ def _print_help(out=None) -> None:
         "Commands:\n"
         "  init             Scaffold ~/.hermes/solomon/ and finish setup.\n"
         "  doctor           Check that everything is wired right.\n"
+        "  profile          Show what Solomon has saved about you.\n"
         "  logs             View structured logs.\n"
         "                   Flags: --errors, --today, --since DATE,\n"
         "                          --grep PATTERN, --event NAME, --follow.\n"
@@ -183,6 +187,110 @@ def _cmd_logs(args: list[str]) -> int:
     logs.view(errors_only=opts.errors, today_only=opts.today,
               since=opts.since, grep=opts.grep, event=opts.event,
               follow=opts.follow)
+    return 0
+
+
+# ---------------------------------------------------------------------------
+# profile — read-only view of what Solomon has saved
+# ---------------------------------------------------------------------------
+
+
+def _cmd_profile() -> int:
+    """Print a human-readable view of profile.yaml + the live queues.
+
+    No LLM call. Just reads the files. Useful right after an /onboard
+    session to confirm what got saved.
+    """
+    from pathlib import Path
+
+    import yaml
+
+    from . import profile
+
+    home = profile.home()
+    profile_path = home / "profile.yaml"
+    if not profile_path.exists():
+        print(f"No profile at {profile_path}. Run `solomon init` first.")
+        return 1
+
+    try:
+        data = yaml.safe_load(profile_path.read_text()) or {}
+    except yaml.YAMLError as e:
+        print(f"profile.yaml is not parseable: {e}")
+        return 1
+
+    meta = data.get("meta", {}) or {}
+    print("Solomon — what's saved\n")
+    print(f"Home:    {home}")
+    print(f"Updated: {meta.get('last_updated') or '(never)'}")
+    print(f"Owner:   {meta.get('owner_name') or '(unset)'}")
+    print(f"Business:{meta.get('business_name') and ' ' + meta['business_name'] or ' (unset)'}")
+    print(f"Channel: {meta.get('preferred_channel') or '(unset)'}")
+    print()
+
+    print("Foundation sessions:")
+    for n in range(7):
+        section_key = profile.SESSION_SECTION[n]
+        section = data.get(section_key, {}) or {}
+        marker = "✓" if section.get("filled") else "○"
+        filled_at = (section.get("filled_at") or "").split("T")[0]
+        suffix = f"  ({filled_at})" if filled_at else ""
+        print(f"  {marker} Session {n} — {profile.SESSION_NAMES[n]}{suffix}")
+    print()
+
+    # Per-section content for filled sessions.
+    any_filled = False
+    for n in range(7):
+        section_key = profile.SESSION_SECTION[n]
+        section = data.get(section_key, {}) or {}
+        if not section.get("filled"):
+            continue
+        any_filled = True
+        print(f"--- Session {n}: {profile.SESSION_NAMES[n]} ---")
+        for field, value in section.items():
+            if field in ("filled", "filled_at"):
+                continue
+            if isinstance(value, list):
+                if not value:
+                    print(f"  {field}: (empty)")
+                else:
+                    print(f"  {field}:")
+                    for item in value:
+                        if isinstance(item, dict):
+                            print(f"    - {item}")
+                        else:
+                            print(f"    - {item}")
+            elif isinstance(value, str):
+                if not value:
+                    print(f"  {field}: (empty)")
+                elif len(value) > 80:
+                    print(f"  {field}: {value[:80]}…")
+                else:
+                    print(f"  {field}: {value}")
+            else:
+                print(f"  {field}: {value}")
+        print()
+
+    if not any_filled:
+        print("(No foundation sessions completed yet. Type /onboard to start.)\n")
+
+    summary = (data.get("summary") or {}).get("text", "")
+    if summary:
+        print("Profile summary (regenerated weekly):")
+        for line in summary.splitlines():
+            print(f"  {line}")
+        print()
+
+    # Queues.
+    review_pending = profile.read_queue("review", "pending", limit=10_000)
+    actions_pending = profile.read_queue("actions", "pending", limit=10_000)
+    actions_stale = profile.read_queue("actions", "stale", limit=10_000)
+    print(f"Review queue:    {len(review_pending)} pending")
+    print(f"Pending actions: {len(actions_pending)} pending, {len(actions_stale)} stale")
+
+    inbox_dir = home / "inbox"
+    inbox_files = [p.name for p in inbox_dir.iterdir() if p.is_file()] if inbox_dir.exists() else []
+    print(f"Inbox:           {len(inbox_files)} file(s)")
     return 0
 
 
