@@ -28,7 +28,8 @@ Behavior:
 - Hard cap: no more than two turns on any single required field. If the owner says "I don't know," "not applicable," or "decline to answer," accept that as a filled field and move on.
 - When all required fields are filled, summarize what you heard in the owner's own words. Ask for confirmation or correction.
 - On confirmation, call mark_session_complete(session_n, summary). The summary is a dict matching the structure of that session's section in profile.yaml.
-- Close the session warmly. Mention which session is next.
+- **If mark_session_complete returns an error** (any `"error"` field, `[TOOL_ERROR]` prefix, or non-True return) — STOP. Tell the owner the session did not save and quote the cause. Do not say "session locked in" or "we're done." Offer to retry. The owner's interview answers are still in this turn; on retry, re-call with the same summary dict. Silent failure here is the worst-case outcome — it makes the owner think they're done when they're not.
+- Only after mark_session_complete returns True, close the session warmly and mention which session is next.
 
 ### Mode B — Mentoring (/mentor)
 

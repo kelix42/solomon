@@ -39,6 +39,94 @@ VALID_ACTION_KINDS = (
 VALID_DECISIONS = ("approve", "edit", "reject")
 
 # ---------------------------------------------------------------------------
+# Defensive type coercion
+# ---------------------------------------------------------------------------
+#
+# OpenAI-style tool calls deliver arguments as JSON-decoded values. In
+# theory the schema's "type": "integer" / "boolean" / "object" gives the
+# LLM the right format; in practice many providers (and some models)
+# stringify numerics, JSON-encode nested objects, or pass enum-string
+# booleans. The same Hermes dispatcher that bit us with `task_id` will
+# happily pass `session_n: "0"` straight through. Coerce defensively at
+# the call site so a stringified int doesn't cause a silent ValueError
+# that the LLM then narrates over.
+
+
+def _coerce_int(value: Any, name: str = "value") -> int:
+    """Accept int or stringified int. Reject bools (they're int subclass)."""
+    if isinstance(value, bool):
+        raise TypeError(f"{name} must be an integer (got bool)")
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float) and value.is_integer():
+        return int(value)
+    if isinstance(value, str):
+        s = value.strip()
+        if s.lstrip("-").isdigit():
+            return int(s)
+    raise ValueError(f"{name} must be an integer (got {type(value).__name__}: {value!r})")
+
+
+def _coerce_bool(value: Any, name: str = "value") -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, int):
+        return bool(value)
+    if isinstance(value, str):
+        v = value.strip().lower()
+        if v in ("true", "1", "yes", "on"):
+            return True
+        if v in ("false", "0", "no", "off"):
+            return False
+    raise ValueError(f"{name} must be a boolean (got {type(value).__name__}: {value!r})")
+
+
+def _coerce_dict(value: Any, name: str = "value") -> dict:
+    if value is None:
+        return {}
+    if isinstance(value, dict):
+        return value
+    if isinstance(value, str):
+        import json
+        try:
+            parsed = json.loads(value)
+        except json.JSONDecodeError as e:
+            raise ValueError(
+                f"{name} must be an object/dict (got string that isn't JSON: {e})"
+            ) from None
+        if not isinstance(parsed, dict):
+            raise ValueError(
+                f"{name} must be an object/dict (got JSON {type(parsed).__name__})"
+            )
+        return parsed
+    raise ValueError(f"{name} must be an object/dict (got {type(value).__name__})")
+
+
+def _coerce_list(value: Any, name: str = "value") -> list:
+    if value is None:
+        return []
+    if isinstance(value, list):
+        return value
+    if isinstance(value, str):
+        # Two shapes: a JSON-encoded list, or a single bare string we
+        # wrap as a one-element list (the latter is forgiving — the LLM
+        # passing one source instead of a list shouldn't crash the call).
+        import json
+        s = value.strip()
+        if s.startswith("[") and s.endswith("]"):
+            try:
+                parsed = json.loads(s)
+            except json.JSONDecodeError as e:
+                raise ValueError(
+                    f"{name} must be a list (got string that isn't JSON: {e})"
+                ) from None
+            if isinstance(parsed, list):
+                return parsed
+        return [value]
+    raise ValueError(f"{name} must be a list (got {type(value).__name__})")
+
+
+# ---------------------------------------------------------------------------
 # Read tools
 # ---------------------------------------------------------------------------
 
@@ -71,6 +159,7 @@ def read_playbook(name: str) -> str:
 
 def read_queue(status: str = "pending", limit: int = 20, queue: str = "review") -> list[dict]:
     start = time.monotonic()
+    limit = _coerce_int(limit, "limit")
     try:
         out = profile.read_queue(queue=queue, status=status, limit=limit)
         logs.log("tool_call", tool="read_queue",
@@ -123,7 +212,8 @@ def propose_addition(file: str, section: str, content: str, reason: str,
 def flag_contradiction(description: str, sources: list[str]) -> str:
     if not description:
         raise ValueError("description is required")
-    if not isinstance(sources, list) or len(sources) < 2:
+    sources = _coerce_list(sources, "sources")
+    if len(sources) < 2:
         raise ValueError("sources must be a list of two or more file references")
     item = {
         "kind": "contradiction",
@@ -164,6 +254,8 @@ def propose_action(
         raise ValueError(f"bad urgency {urgency!r}; valid: {VALID_URGENCIES}")
     if action_kind not in VALID_ACTION_KINDS:
         raise ValueError(f"bad action_kind {action_kind!r}; valid: {VALID_ACTION_KINDS}")
+    action_payload = _coerce_dict(action_payload, "action_payload") if action_payload is not None else None
+    playbooks_consulted = _coerce_list(playbooks_consulted, "playbooks_consulted") if playbooks_consulted is not None else None
 
     # De-dupe: if a pending action already exists for the same (source_kind, source_id),
     # update it instead of appending a duplicate.
@@ -374,6 +466,7 @@ def read_inbox_file(name: str, max_chars: int = 60_000) -> str:
     """Return the text content of one inbox file. Caps at max_chars so a
     huge document doesn't blow the LLM's context — the LLM can decide what
     to do with truncation."""
+    max_chars = _coerce_int(max_chars, "max_chars")
     if "/" in name or name.startswith(".."):
         raise ValueError("name must be a bare filename, not a path")
     path = profile.home() / "inbox" / name
@@ -430,6 +523,9 @@ def read_conversations(since_hours: int = 24, limit: int = 50,
     `exclude_private=True` (default) filters out session IDs the owner
     has marked private via /private.
     """
+    since_hours = _coerce_int(since_hours, "since_hours")
+    limit = _coerce_int(limit, "limit")
+    exclude_private = _coerce_bool(exclude_private, "exclude_private")
     if _adapter is None:
         logs.log("read_conversations_no_adapter", level="WARN")
         return []
@@ -618,6 +714,8 @@ def _queue_pending_message(text: str, target: Optional[str] = None) -> None:
 
 
 def mark_session_complete(session_n: int, summary: dict) -> bool:
+    session_n = _coerce_int(session_n, "session_n")
+    summary = _coerce_dict(summary, "summary")
     profile.write_session_summary(session_n, summary)
     logs.log("mark_session_complete", context={"session_n": session_n})
     return True
