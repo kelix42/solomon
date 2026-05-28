@@ -43,6 +43,25 @@ def _next_unfilled_session() -> Optional[int]:
     return None
 
 
+def _session_checklist() -> tuple[list[str], int]:
+    """Return (lines, filled_count) for the 7-session ✓/☐ checklist."""
+    data = yaml.safe_load((profile.home() / "profile.yaml").read_text())
+    lines: list[str] = []
+    filled_count = 0
+    for n in range(7):
+        section = profile.SESSION_SECTION[n]
+        sect = data.get(section, {}) or {}
+        name = profile.SESSION_NAMES[n]
+        if sect.get("filled"):
+            filled_count += 1
+            filled_at = sect.get("filled_at", "")
+            short_date = filled_at.split("T")[0] if filled_at else ""
+            lines.append(f"  ✓ {n}  {name:<24}  ({short_date})")
+        else:
+            lines.append(f"  ☐ {n}  {name}")
+    return lines, filled_count
+
+
 def _last_activity_ts() -> Optional[str]:
     log_file = logs.log_path()
     if not log_file.exists():
@@ -82,12 +101,19 @@ def cmd_onboard(raw_args: str) -> str:
                 "filled. Use /mentor to deepen specific areas.")
     session_state.push_pending_intent("onboarding", session_n=n)
     name = profile.SESSION_NAMES[n]
-    return (
+    checklist, filled_count = _session_checklist()
+    verb = "start" if filled_count == 0 else "continue"
+    lines = [
+        f"Foundation sessions: {filled_count} of 7 complete",
+        *checklist,
+        "",
         f"Starting session {n} — {name}. I'll ask one question at a time. "
         "Take your time. Stop any time; the next /onboard picks up where we "
-        "left off.\n\n"
-        "Reply to this with whatever you want to say first."
-    )
+        "left off.",
+        "",
+        f"Are you ready to {verb}?",
+    ]
+    return "\n".join(lines)
 
 
 # ---------------------------------------------------------------------------
@@ -131,21 +157,7 @@ def cmd_mentor(raw_args: str) -> str:
 
 def cmd_status(raw_args: str) -> str:
     profile.init_solomon_home()
-    data = yaml.safe_load((profile.home() / "profile.yaml").read_text())
-
-    sessions_lines = []
-    filled_count = 0
-    for n in range(7):
-        section = profile.SESSION_SECTION[n]
-        sect = data.get(section, {}) or {}
-        name = profile.SESSION_NAMES[n]
-        if sect.get("filled"):
-            filled_count += 1
-            filled_at = sect.get("filled_at", "")
-            short_date = filled_at.split("T")[0] if filled_at else ""
-            sessions_lines.append(f"  ✓ {n}  {name:<24}  ({short_date})")
-        else:
-            sessions_lines.append(f"  ☐ {n}  {name}")
+    sessions_lines, filled_count = _session_checklist()
 
     review_pending = profile.read_queue("review", "pending", limit=10_000)
     actions = profile.read_queue("actions", "all", limit=10_000)
