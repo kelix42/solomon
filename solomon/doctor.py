@@ -40,9 +40,29 @@ BOLD = lambda s: _colorize(s, "1")
 
 def check_home_exists() -> tuple[str, str, Optional[str]]:
     h = profile.home()
+    if os.getenv("SOLOMON_HOME"):
+        how = "SOLOMON_HOME"
+    elif os.getenv("HERMES_HOME"):
+        how = "$HERMES_HOME/solomon"
+    else:
+        how = "default ~/.hermes/solomon"
     if not h.exists():
         return "red", f"Solomon home folder missing: {h}", "Run `solomon init`."
-    return "green", f"Solomon home: {h}", None
+    return "green", f"Solomon home: {h}  (resolved via {how})", None
+
+
+def check_no_split_home() -> tuple[str, str, Optional[str]]:
+    """Catch the split-brain home bug: a second profile.yaml living outside
+    the canonical home, holding data the live gateway never reads."""
+    stray = profile.detect_stray_profiles()
+    if stray:
+        locations = ", ".join(str(p) for p in stray)
+        canonical = profile.home() / "profile.yaml"
+        return "red", f"Split-brain home: profile.yaml also exists at {locations}", \
+               (f"Solomon reads {canonical}. Compare it with the stray file(s); "
+                "copy the fuller one into the canonical home, then move the stray "
+                "aside so this can't silently re-split.")
+    return "green", "No stray profile.yaml outside the canonical home", None
 
 
 def check_profile_parses() -> tuple[str, str, Optional[str]]:
@@ -180,6 +200,7 @@ def check_preferred_channel() -> tuple[str, str, Optional[str]]:
 
 CHECKS: list[tuple[str, Callable[[], tuple[str, str, Optional[str]]]]] = [
     ("home folder", check_home_exists),
+    ("split-home", check_no_split_home),
     ("profile.yaml", check_profile_parses),
     ("playbooks", check_all_playbooks_exist),
     ("queues", check_queues_exist),

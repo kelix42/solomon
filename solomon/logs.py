@@ -25,9 +25,25 @@ DEFAULT_LEVEL = "INFO"
 
 
 def home() -> Path:
-    """Return the Solomon home folder (~/.hermes/solomon by default)."""
-    base = os.getenv("SOLOMON_HOME") or os.path.expanduser("~/.hermes/solomon")
-    return Path(base)
+    """Return the Solomon home folder.
+
+    Resolution order (first match wins):
+      1. ``SOLOMON_HOME`` if explicitly set — used by tests and power users.
+      2. ``$HERMES_HOME/solomon`` when running inside Hermes. Hermes sets
+         ``HERMES_HOME`` for every process it spawns, so anchoring on it keeps
+         Solomon's home aligned with Hermes's home regardless of how the
+         OS-level ``~`` resolves in a given subprocess. This is what prevents
+         the "split-brain home" bug where interactive turns and the background
+         gateway disagreed about where home is and data landed in two folders.
+      3. ``~/.hermes/solomon`` as a last resort (CLI use outside Hermes).
+    """
+    explicit = os.getenv("SOLOMON_HOME")
+    if explicit:
+        return Path(explicit)
+    hermes_home = os.getenv("HERMES_HOME")
+    if hermes_home:
+        return Path(hermes_home) / "solomon"
+    return Path(os.path.expanduser("~/.hermes/solomon"))
 
 
 def log_path() -> Path:

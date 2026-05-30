@@ -102,6 +102,31 @@ def home() -> Path:
     return logs.home()
 
 
+def detect_stray_profiles() -> list[Path]:
+    """Return a stray ``profile.yaml`` sitting in the canonical home's PARENT.
+
+    This is the exact "split-brain home" failure (2026-05-30): a Solomon
+    ``profile.yaml`` ends up directly in Hermes's home root (``~/.hermes``)
+    instead of the canonical ``~/.hermes/solomon`` subfolder. The live gateway
+    reads the subfolder, so it never sees the owner's onboarding answers and
+    behaves as if the profile were empty. We surface that loudly (doctor +
+    a startup WARN) rather than silently treating the owner as a blank slate.
+
+    Deliberately narrow — it checks only the parent dir — so it never
+    false-positives on a legitimate ``SOLOMON_HOME`` override (tests, power
+    users) where a normal home also exists at the default location.
+    """
+    canonical_dir = home()
+    stray_path = canonical_dir.parent / "profile.yaml"
+    try:
+        same = stray_path.resolve() == (canonical_dir / "profile.yaml").resolve()
+    except OSError:
+        same = stray_path == canonical_dir / "profile.yaml"
+    if not same and stray_path.exists():
+        return [stray_path]
+    return []
+
+
 # ---------------------------------------------------------------------------
 # Templates (used by init_solomon_home)
 # ---------------------------------------------------------------------------
