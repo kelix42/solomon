@@ -191,7 +191,11 @@ def test_register_all_calls_adapter(solomon_home: Path):
 
     class FakeAdapter:
         def register_tool(self, *, name, description, schema, handler):
-            calls.append((name, schema["properties"], handler))
+            # Pull parameter properties out of the OpenAI-spec shape — the
+            # schema dict's parameters field is what the LLM ultimately
+            # reads. If properties is empty, the LLM sees a parameterless
+            # tool stub (the bug that bit the live install on 2026-05-25).
+            calls.append((name, schema["parameters"]["properties"], handler))
 
     tools.register_all(FakeAdapter())
     names = [c[0] for c in calls]
@@ -208,6 +212,59 @@ def test_register_all_calls_adapter(solomon_home: Path):
     rp_handler = next(c[2] for c in calls if c[0] == "read_profile")
     result = rp_handler({"section": "industry"})
     assert "not yet filled" in result
+
+
+def test_every_tool_schema_is_openai_function_spec(solomon_home: Path):
+    """Regression for the 2026-05-26 incident: schemas were registered as raw
+    JSON Schema (type/properties at the top level) instead of the OpenAI
+    function-spec shape (description + parameters). Hermes's get_definitions
+    flattens whatever's in the schema onto the function field; without a
+    `parameters` wrapper the LLM sees an empty parameter list and either
+    silently ignores the tool or falls back to execute_code workarounds.
+
+    This test pins the shape for every Solomon tool so the bug can't
+    regress silently. If a new tool is added without the `parameters`
+    wrap, this fails."""
+    profile.init_solomon_home()
+    schemas: dict[str, dict] = {}
+
+    class CaptureAdapter:
+        def register_tool(self, *, name, description, schema, handler):
+            schemas[name] = schema
+
+    tools.register_all(CaptureAdapter())
+
+    assert len(schemas) == 19, f"expected 19 tools, got {len(schemas)}"
+    for name, schema in schemas.items():
+        # OpenAI tool spec: each function must have "description" and
+        # "parameters" at the top level. "parameters" itself is the
+        # JSON Schema for the args dict.
+        assert "description" in schema, (
+            f"{name}: schema missing top-level 'description' field"
+        )
+        assert "parameters" in schema, (
+            f"{name}: schema missing top-level 'parameters' field — "
+            "the LLM will see an empty parameter list"
+        )
+        params = schema["parameters"]
+        assert params.get("type") == "object", (
+            f"{name}: parameters.type must be 'object' (got {params.get('type')!r})"
+        )
+        # `properties` is allowed to be empty for parameterless tools
+        # (list_inbox, list_pending_actions_due_for_nudge, retry_pending_messages).
+        assert "properties" in params, (
+            f"{name}: parameters.properties missing"
+        )
+
+    # Tools that take args must have non-empty properties — otherwise the
+    # LLM has no signature to call against.
+    parameterless = {"list_inbox", "list_pending_actions_due_for_nudge",
+                     "retry_pending_messages"}
+    for name, schema in schemas.items():
+        if name in parameterless:
+            continue
+        props = schema["parameters"]["properties"]
+        assert props, f"{name}: parameters.properties empty but tool takes args"
 
 
 def test_handler_accepts_extra_kwargs_from_hermes(solomon_home):
@@ -231,3 +288,44 @@ def test_handler_accepts_extra_kwargs_from_hermes(solomon_home):
     # Should NOT raise even when Hermes passes task_id (and any future kwarg).
     out = rp_handler({"section": "industry"}, task_id="some-task")
     assert "not yet filled" in out
+
+
+@pytest.mark.parametrize(
+    "returned, expected",
+    [
+        (True, "true"),
+        (False, "false"),
+        ({"a": 1, "b": [2, 3]}, '{"a": 1, "b": [2, 3]}'),
+        ([1, "two", None], '[1, "two", null]'),
+        (None, "null"),
+        (42, "42"),
+    ],
+)
+def test_make_handler_json_encodes_non_string_returns(returned, expected):
+    """Hermes's tool dispatch calls len() on every handler return, so a
+    non-string (bool/dict/list/None) raised 'object of type X has no len()'.
+    _make_handler must JSON-encode any non-string return. Regression for the
+    2026-05-29 'object of type bool has no len()' incident."""
+    from solomon import tools
+
+    def fn(**_kwargs):
+        return returned
+
+    fn.__name__ = "fake_tool"
+    handler = tools._make_handler(fn)
+    out = handler({})
+    assert isinstance(out, str)
+    assert out == expected
+
+
+def test_make_handler_passes_strings_through_unchanged():
+    """A handler that already returns a string must be returned verbatim —
+    no double JSON-encoding (which would add surrounding quotes)."""
+    from solomon import tools
+
+    def fn(**_kwargs):
+        return "q_12345"
+
+    fn.__name__ = "fake_tool"
+    handler = tools._make_handler(fn)
+    assert handler({}) == "q_12345"

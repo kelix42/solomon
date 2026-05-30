@@ -13,6 +13,7 @@ The tools split into:
 
 from __future__ import annotations
 
+import json
 import time
 from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
@@ -943,10 +944,22 @@ def register_all(adapter) -> None:  # noqa: ANN001
         "retry_pending_messages": retry_pending_messages,
     }
     for name, fn in funcs.items():
+        # Build the OpenAI-spec function definition shape Hermes expects.
+        # tools/registry.py:366 takes our `schema` and emits it as the
+        # `function` field of the LLM tool advertisement; the LLM then
+        # reads `function.parameters` to know what args to pass. If we
+        # ship a raw JSON Schema (type/properties/required at the top
+        # level), `function.parameters` is missing and the LLM sees an
+        # empty tool stub — which it then either ignores or works around
+        # by calling execute_code directly (a quiet bypass of every
+        # Solomon safety boundary). Wrap deliberately.
         adapter.register_tool(
             name=name,
             description=_DESCRIPTIONS[name],
-            schema=_SCHEMAS[name],
+            schema={
+                "description": _DESCRIPTIONS[name],
+                "parameters": _SCHEMAS[name],
+            },
             handler=_make_handler(fn),
         )
 
@@ -956,12 +969,18 @@ def _make_handler(fn):
 
     Hermes's tools/registry.py:404 calls handlers as `handler(args, **kwargs)`,
     passing context kwargs like `task_id` alongside the args dict. We accept
-    and discard those — none of Solomon's tools need them today. Returning
-    something other than a string would also be fine (Hermes JSON-encodes
-    non-string returns), but most of our tools already return primitives or
-    short status messages.
+    and discard those — none of Solomon's tools need them today.
+
+    Hermes's tool dispatch (agent/tool_executor.py) calls `len(result)` on the
+    return value, so every handler MUST return a string. Several Solomon tools
+    return primitives (e.g. mark_session_complete returns True) or dicts, so we
+    JSON-encode any non-string return here rather than leaking a bool/dict/None
+    into Hermes and triggering `TypeError: object of type 'bool' has no len()`.
     """
-    def handler(args: dict, **_ctx: Any) -> Any:
-        return fn(**args)
+    def handler(args: dict, **_ctx: Any) -> str:
+        result = fn(**args)
+        if isinstance(result, str):
+            return result
+        return json.dumps(result)
     handler.__name__ = fn.__name__
     return handler
