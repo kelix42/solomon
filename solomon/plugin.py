@@ -19,15 +19,6 @@ def register(ctx) -> HermesAdapter:  # noqa: ANN001  (Hermes passes its own ctx)
         from . import profile
         profile.init_solomon_home()
 
-        # Loudly flag a split-brain home (a second profile.yaml outside the
-        # canonical home). Silent splits cost the owner days of "lost"
-        # onboarding once before this guard existed — never again quietly.
-        stray = profile.detect_stray_profiles()
-        if stray:
-            logs.log("split_home_detected", level="WARN",
-                     context={"canonical": str(profile.home()),
-                              "stray": [str(p) for p in stray]})
-
         tools.register_all(adapter)
         slash.register_all(adapter)
         hooks.register_all(adapter)
