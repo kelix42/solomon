@@ -449,6 +449,27 @@ def read_profile_section(section: str) -> str:
     return yaml.safe_dump({section: value}, sort_keys=False).strip()
 
 
+def onboarding_status() -> dict:
+    """How far onboarding has progressed, by filled session section.
+
+    Returns ``{total, filled, completed, remaining}`` where completed/remaining
+    are the human-readable session names. Used so Solomon can report accurate
+    partial-completion state instead of treating a half-built profile as empty.
+    """
+    data = _load_profile()
+    completed: list[str] = []
+    remaining: list[str] = []
+    for n in sorted(SESSION_SECTION):
+        target = completed if data.get(SESSION_SECTION[n], {}).get("filled") else remaining
+        target.append(SESSION_NAMES[n])
+    return {
+        "total": len(SESSION_SECTION),
+        "filled": len(completed),
+        "completed": completed,
+        "remaining": remaining,
+    }
+
+
 def write_session_summary(session_n: int, summary: dict) -> None:
     """Used by mark_session_complete. Validates and writes the section."""
     if session_n not in SESSION_SECTION:

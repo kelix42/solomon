@@ -177,3 +177,29 @@ def test_archive_playbook_version(solomon_home: Path):
     assert archived is not None
     assert archived.exists()
     assert archived.read_text().startswith("# Finance")
+
+
+def test_onboarding_status_counts_filled_sessions(solomon_home: Path):
+    profile.init_solomon_home()
+    # Fresh: nothing filled.
+    s = profile.onboarding_status()
+    assert s["total"] == 7
+    assert s["filled"] == 0
+    assert s["completed"] == []
+    assert len(s["remaining"]) == 7
+
+    # Fill two sessions; counts + names update, ordered by session number.
+    profile.write_session_summary(0, {
+        "business_category": "real estate law",
+        "primary_product_or_service": "closings",
+        "customer_orientation": "B2C",
+        "geographic_scope": "Manitoba",
+        "revenue_model": "flat fee",
+        "growth_stage": "established",
+        "concentration_risk": "spread",
+    })
+    profile.write_session_summary(5, {"rules": ["No closing that isn't ready."]})
+    s = profile.onboarding_status()
+    assert s["filled"] == 2
+    assert s["completed"] == ["Industry & sector", "Non-negotiables"]
+    assert "Belief system" in s["remaining"]

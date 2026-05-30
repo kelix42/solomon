@@ -37,8 +37,12 @@ PROMPT = (
     "3. Compose ONE short message inviting the owner to talk. Tone: a "
     "thoughtful colleague checking in, not a customer-service bot. No "
     "preamble. Just the message.\n"
+    "   - If onboarding isn't finished yet, the genuine gap IS onboarding: "
+    "warmly invite them to continue with /onboard. One or two sentences.\n"
     "\n"
-    "Your final response IS the message that gets delivered to the owner. "
+    "Your final response IS the literal message delivered to the owner — "
+    "nothing else. Do NOT narrate your reasoning, describe the profile state, "
+    "or explain why you chose this gap; the owner sees only what you output. "
     "If nothing is worth surfacing this week, respond with exactly [SILENT] "
     "(no other text) and the run is suppressed."
 )

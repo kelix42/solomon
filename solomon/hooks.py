@@ -82,19 +82,40 @@ def _load_vocabulary() -> str:
 
 
 def _load_profile_summary() -> tuple[str, bool]:
-    """Return (summary_text, is_empty_profile)."""
+    """Return (profile_summary_block, truly_empty).
+
+    The block is injected under '# Profile summary'. Three states, so we never
+    tell the LLM the profile is empty when it isn't:
+      - a polished summary exists (the weekly cron has run) -> use it;
+      - onboarding has progressed but the summary hasn't regenerated yet ->
+        an accurate progress block, NOT '(empty)';
+      - nothing filled at all -> the genuine empty-profile invite.
+    truly_empty is True only in the last case (it gates the /onboard nudge).
+    """
     path = profile.home() / "profile.yaml"
+    empty_msg = "(no profile yet — first turn, invite the owner to /onboard)"
     if not path.exists():
-        return "", True
+        return empty_msg, True
     try:
         data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
     except yaml.YAMLError:
         return "(profile.yaml unreadable)", True
     summary = (data.get("summary") or {}).get("text", "")
-    meta_last = (data.get("meta") or {}).get("last_updated")
-    industry_filled = (data.get("industry") or {}).get("filled", False)
-    is_empty = not meta_last and not industry_filled
-    return summary, is_empty
+    if summary and summary.strip():
+        return summary.strip(), False
+    status = profile.onboarding_status()
+    if status["filled"] == 0:
+        return empty_msg, True
+    lines = [
+        f"Onboarding in progress — {status['filled']} of {status['total']} "
+        "foundation sessions complete.",
+        "Captured: " + ", ".join(status["completed"]) + ".",
+    ]
+    if status["remaining"]:
+        lines.append("Still to do: " + ", ".join(status["remaining"]) + ".")
+    lines.append("The polished always-on summary regenerates weekly; for a "
+                 "completed section's detail call read_profile(section).")
+    return "\n".join(lines), False
 
 
 def _tool_menu() -> str:
@@ -210,7 +231,7 @@ def pre_llm_call(*, session_id: str = "", user_message: Any = None,
         return None
 
     active = session_state.get_active_mode(session_id)
-    summary, is_empty = _load_profile_summary()
+    summary_block, truly_empty = _load_profile_summary()
     vocab = _load_vocabulary().strip() or "(vocabulary file is empty — capture phrases as you hear them)"
     is_inbound, kind, source_id = _detect_inbound(user_message, platform)
 
@@ -236,7 +257,7 @@ def pre_llm_call(*, session_id: str = "", user_message: Any = None,
             "# Solomon interview role (active)\n\n" + skill +
             "\n\n# Active mode\n\n" + "\n".join(meta_lines) +
             "\n\n# Owner vocabulary\n\n" + vocab +
-            "\n\n# Profile summary\n\n" + (summary or "(profile is empty)") +
+            "\n\n# Profile summary\n\n" + summary_block +
             "\n\n" + _tool_menu()
         )
         logs.log("skill_loaded", skill="solomon-interview",
@@ -251,11 +272,11 @@ def pre_llm_call(*, session_id: str = "", user_message: Any = None,
         "\n# Owner vocabulary\n",
         vocab,
         "\n# Profile summary\n",
-        summary.strip() if summary and summary.strip() else "(profile is empty — first turn invite the owner to /onboard)",
+        summary_block,
         "\n",
         _tool_menu(),
     ]
-    if is_empty:
+    if truly_empty:
         block_parts.append("\nNOTE: profile.yaml is empty. Invite the owner to run /onboard.")
     if is_inbound:
         block_parts.append(

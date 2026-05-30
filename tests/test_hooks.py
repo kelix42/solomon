@@ -50,6 +50,21 @@ def test_pre_llm_call_empty_profile_invites_onboard(solomon_home: Path):
     assert "/onboard" in block
 
 
+def test_pre_llm_call_partial_profile_shows_progress_not_empty(solomon_home: Path):
+    """Sessions completed but the weekly summary not yet regenerated must NOT
+    read as an empty profile. Regression for the 'profile is empty' lie."""
+    profile.init_solomon_home()
+    profile.write_session_summary(5, {"rules": ["Never push a closing that isn't ready."]})
+    block = hooks.pre_llm_call(session_id="s", user_message="hi",
+                                  conversation_history=[], is_first_turn=True,
+                                  model="m", platform="cli")["context"]
+    assert "1 of 7" in block
+    assert "Non-negotiables" in block
+    # The old lie must be gone.
+    assert "profile.yaml is empty" not in block
+    assert "no profile yet" not in block
+
+
 # ---------------------------------------------------------------------------
 # Bypasses
 # ---------------------------------------------------------------------------
