@@ -24,17 +24,24 @@ LOGGER_NAME = "solomon"
 DEFAULT_LEVEL = "INFO"
 
 
-def home() -> Path:
-    """Return Solomon's data folder: always ``<Hermes home>/solomon``.
+def hermes_home() -> Path:
+    """Hermes's home directory — the single anchor for every Solomon path.
 
     Anchored on ``HERMES_HOME``, which Hermes sets identically for every
     process it runs — the gateway, cron jobs, and an interactive terminal
-    session — so ``/onboard`` saves to the same place no matter where it runs.
-    Falls back to ``~/.hermes`` only when invoked outside Hermes (e.g. the
-    bare ``solomon`` CLI before a gateway has set the variable).
+    session. Anchoring everything here keeps Solomon's data folder *and* the
+    Hermes config/skills paths the adapter resolves all pointing at one place,
+    so nothing can disagree about where Hermes lives. Falls back to
+    ``~/.hermes`` only when invoked outside Hermes (e.g. the bare ``solomon``
+    CLI before a gateway has set the variable).
     """
-    base = os.getenv("HERMES_HOME") or os.path.expanduser("~/.hermes")
-    return Path(base) / "solomon"
+    return Path(os.getenv("HERMES_HOME") or os.path.expanduser("~/.hermes"))
+
+
+def home() -> Path:
+    """Return Solomon's data folder: always ``<Hermes home>/solomon``, so
+    ``/onboard`` saves to the same place no matter which process runs it."""
+    return hermes_home() / "solomon"
 
 
 def log_path() -> Path:

@@ -40,21 +40,20 @@ PLUGIN_NAME = "solomon"
 ENTRY_POINT_GROUP = "hermes_agent.plugins"
 SOLOMON_TOOLSET = "solomon"
 
-# Filesystem layout (Hermes side).
-HERMES_HOME = Path.home() / ".hermes"
-
-
 # ---------------------------------------------------------------------------
 # Path helpers — Hermes-side filesystem layout
+#
+# All anchored on logs.hermes_home() (HERMES_HOME), the one source of truth
+# for where Hermes lives, so the adapter and Solomon's data home never disagree.
 # ---------------------------------------------------------------------------
 
 
 def hermes_config_path() -> Path:
-    return HERMES_HOME / "config.yaml"
+    return logs.hermes_home() / "config.yaml"
 
 
 def hermes_skills_dir() -> Path:
-    return HERMES_HOME / "skills"
+    return logs.hermes_home() / "skills"
 
 
 def hermes_skills_dir_for(plugin_name: str = PLUGIN_NAME) -> Path:
